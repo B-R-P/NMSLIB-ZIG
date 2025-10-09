@@ -90,7 +90,7 @@ pub const Params = struct {
         const c_alloc = c.nmslib_allocator_t{
             .alloc = c_alloc_fn,
             .free = c_free_fn,
-            .ctx = @ptrCast(allocator),
+            .ctx = @ptrCast(@constCast(&allocator)),
         };
         const c_params = c.nmslib_create_params(&c_alloc) orelse return error.OutOfMemory;
         return .{ .c_params = c_params, .allocator = allocator };
@@ -106,12 +106,11 @@ pub const Params = struct {
     pub fn add(self: *Params, key: []const u8, value: ParamValue) !void {
         const key_z = try self.allocator.dupeZ(u8, key);
         defer self.allocator.free(key_z);
-
         switch (value) {
             .String => |s| {
                 const value_z = try self.allocator.dupeZ(u8, s);
                 defer self.allocator.free(value_z);
-                try mapError(c.nmslib_add_param(self.c_params, key_z, 2, value_z));
+                try mapError(c.nmslib_add_param(self.c_params, key_z, 2, @ptrCast(&value_z)));
             },
             .Int => |i| try mapError(c.nmslib_add_param(self.c_params, key_z, 0, &i)),
             .Double => |d| try mapError(c.nmslib_add_param(self.c_params, key_z, 1, &d)),
@@ -178,30 +177,35 @@ pub const DataPoint = union(DataType) {
     }
 };
 
+pub const QueryPoint = union(DataType) {
+    DenseVector: []const f32,
+    SparseVector: []const SparseElem,
+    DenseUInt8Vector: []const u8,
+    ObjectAsString: []const u8,
+};
 // Main index struct
 pub const Index = struct {
     handle: c.nmslib_index_handle_t,
     allocator: Allocator,
 
-    /// Initializes a new index with the specified space, method, and data type.
-    pub fn init(allocator: Allocator, space: []const u8, space_params: ?Params, method: []const u8, data_type: DataType, dist_type: DistType) !Index {
-        const space_z = try allocator.dupeZ(u8, space);
+    // Fixed Index.init to properly handle optional params
+    pub fn init(allocator: Allocator, space_type: []const u8, params: ?Params, method: []const u8, data_type: DataType, dist_type: DistType) !Index {
+        var handle: c.nmslib_index_handle_t = undefined;
+        const space_z = try allocator.dupeZ(u8, space_type);
         defer allocator.free(space_z);
         const method_z = try allocator.dupeZ(u8, method);
         defer allocator.free(method_z);
-
+        const c_params: c.nmslib_params_handle_t = if (params) |p| p.c_params else null;
         const c_alloc = c.nmslib_allocator_t{
             .alloc = c_alloc_fn,
             .free = c_free_fn,
-            .ctx = @ptrCast(allocator),
+            .ctx = @ptrCast(@constCast(&allocator)),
         };
-
-        var handle: c.nmslib_index_handle_t = undefined;
-        const c_params: ?c.nmslib_params_handle_t = if (space_params) |params| params.c_params else null;
         try mapError(c.nmslib_index_create(space_z, c_params, method_z, data_type.toC(), dist_type.toC(), &c_alloc, &handle));
-        if (handle == null) return error.Runtime;
-
-        return .{ .handle = handle, .allocator = allocator };
+        return Index{
+            .allocator = allocator,
+            .handle = handle,
+        };
     }
 
     /// Frees the index.
@@ -217,7 +221,7 @@ pub const Index = struct {
 
     /// Creates the index with the specified parameters.
     pub fn create(self: *Index, params: ?Params, print_progress: bool) !void {
-        const c_params: ?c.nmslib_params_handle_t = if (params) |p| p.c_params else null;
+        const c_params: c.nmslib_params_handle_t = if (params) |p| p.c_params else null;
         try mapError(c.nmslib_create_index(self.handle, c_params, @intFromBool(print_progress)));
     }
 
@@ -258,9 +262,39 @@ pub const Index = struct {
     }
 
     /// Performs a k-NN query for a single query vector.
-    pub fn knnQuery(self: *Index, query: []const f32, k: usize) !QueryResult {
+    pub fn knnQuery(self: *Index, query_in: QueryPoint, k: usize) !QueryResult {
+        const data_type = try self.getDataType();
+        if (std.meta.activeTag(query_in) != data_type) return error.SpaceIncompatible;
+
         var size: usize = undefined;
-        try mapError(c.nmslib_knn_query_get_size(self.handle, query.ptr, query.len, k, &size, 0));
+        var c_query_ptr: *const anyopaque = undefined;
+        var c_query_len: usize = undefined;
+        var c_num_elements: usize = 0;
+
+        switch (query_in) {
+            .DenseVector => |q| {
+                c_query_ptr = q.ptr;
+                c_query_len = q.len;
+                c_num_elements = 0;
+            },
+            .SparseVector => |q| {
+                c_query_ptr = q.ptr;
+                c_query_len = 0;
+                c_num_elements = q.len;
+            },
+            .DenseUInt8Vector => |q| {
+                c_query_ptr = q.ptr;
+                c_query_len = q.len;
+                c_num_elements = 0;
+            },
+            .ObjectAsString => |q| {
+                c_query_ptr = q.ptr;
+                c_query_len = q.len;
+                c_num_elements = 0;
+            },
+        }
+
+        try mapError(c.nmslib_knn_query_get_size(self.handle, c_query_ptr, c_query_len, k, &size, c_num_elements));
 
         const ids = try self.allocator.alloc(i32, size);
         errdefer self.allocator.free(ids);
@@ -273,7 +307,7 @@ pub const Index = struct {
             .size = 0,
             .capacity = size,
         };
-        try mapError(c.nmslib_knn_query_fill(self.handle, query.ptr, query.len, k, &result, 0));
+        try mapError(c.nmslib_knn_query_fill(self.handle, c_query_ptr, c_query_len, k, &result, c_num_elements));
 
         return QueryResult{
             .ids = ids[0..result.size],
@@ -369,13 +403,15 @@ pub const Index = struct {
         try mapError(c.nmslib_get_data_point_fill(self.handle, pos, buffer.ptr, size));
 
         const data_type = try self.getDataType();
-        return DataPoint{
-            inline switch (data_type) {
-                .DenseVector => .{ .DenseVector = @as([*]f32, @ptrCast(buffer.ptr))[0..size / @sizeOf(f32)] },
-                .SparseVector => .{ .SparseVector = @as([*]SparseElem, @ptrCast(buffer.ptr))[0..size / @sizeOf(SparseElem)] },
-                .DenseUInt8Vector => .{ .DenseUInt8Vector = buffer },
-                .ObjectAsString => .{ .ObjectAsString = buffer },
+        return switch (data_type) {
+            .DenseVector => DataPoint{ 
+                .DenseVector = @as([*]f32, @alignCast(@ptrCast(buffer.ptr)))[0..size / @sizeOf(f32)] 
             },
+            .SparseVector => DataPoint{ 
+                .SparseVector = @as([*]SparseElem, @alignCast(@ptrCast(buffer.ptr)))[0..size / @sizeOf(SparseElem)] 
+            },
+            .DenseUInt8Vector => DataPoint{ .DenseUInt8Vector = buffer },
+            .ObjectAsString => DataPoint{ .ObjectAsString = buffer },
         };
     }
 
@@ -386,34 +422,36 @@ pub const Index = struct {
         const c_alloc = c.nmslib_allocator_t{
             .alloc = c_alloc_fn,
             .free = c_free_fn,
-            .ctx = @ptrCast(self.allocator),
+            .ctx = @ptrCast(&self.allocator),
         };
         try mapError(c.nmslib_get_data_point_string(self.handle, pos, &data, &data_len, &c_alloc));
-        defer c.nmslib_free_string(@ptrCast(data), &c_alloc);
+        defer c.nmslib_free_string(@constCast(data), &c_alloc);
 
         return try self.allocator.dupe(u8, data[0..data_len]);
     }
 
     /// Borrows a dense data point at the specified position.
     pub fn borrowDataDense(self: *Index, pos: usize) !struct { data: []const f32, free_fn: *const fn (*anyopaque) void } {
-        var data: *anyopaque = undefined;
+        var data: ?*anyopaque = null;
         var size: usize = undefined;
-        var free_fn: ?*const fn (*anyopaque) void = undefined;
+        var free_fn: ?*const fn (*anyopaque) void = null;
         try mapError(c.nmslib_borrow_data_dense(self.handle, pos, &data, &size, &free_fn));
+        if (data == null) return error.Runtime;
         return .{
-            .data = @as([*]const f32, @ptrCast(data))[0..size],
+            .data = @as([*]const f32, @alignCast(@ptrCast(data.?)))[0..size],
             .free_fn = free_fn orelse return error.Runtime,
         };
     }
 
     /// Borrows a sparse data point at the specified position.
     pub fn borrowDataSparse(self: *Index, pos: usize) !struct { data: []const SparseElem, free_fn: *const fn (*anyopaque) void } {
-        var data: *anyopaque = undefined;
+        var data: ?*anyopaque = null;
         var size: usize = undefined;
-        var free_fn: ?*const fn (*anyopaque) void = undefined;
+        var free_fn: ?*const fn (*anyopaque) void = null;
         try mapError(c.nmslib_borrow_data_sparse(self.handle, pos, &data, &size, &free_fn));
+        if (data == null) return error.Runtime;
         return .{
-            .data = @as([*]const SparseElem, @ptrCast(data))[0..size],
+            .data = @as([*]const SparseElem, @alignCast(@ptrCast(data.?)))[0..size],
             .free_fn = free_fn orelse return error.Runtime,
         };
     }
@@ -429,17 +467,14 @@ pub const Index = struct {
     pub fn load(allocator: Allocator, path: []const u8, data_type: DataType, dist_type: DistType, load_data: bool) !Index {
         const path_z = try allocator.dupeZ(u8, path);
         defer allocator.free(path_z);
-
         const c_alloc = c.nmslib_allocator_t{
             .alloc = c_alloc_fn,
             .free = c_free_fn,
-            .ctx = @ptrCast(allocator),
+            .ctx = @ptrCast(@constCast(&allocator)),
         };
-
         var handle: c.nmslib_index_handle_t = undefined;
         try mapError(c.nmslib_load_index(path_z, data_type.toC(), dist_type.toC(), &c_alloc, @intFromBool(load_data), &handle));
         if (handle == null) return error.Runtime;
-
         return .{ .handle = handle, .allocator = allocator };
     }
 
@@ -470,10 +505,10 @@ pub const Index = struct {
         const c_alloc = c.nmslib_allocator_t{
             .alloc = c_alloc_fn,
             .free = c_free_fn,
-            .ctx = @ptrCast(self.allocator),
+            .ctx = @ptrCast(@constCast(&self.allocator)),
         };
         try mapError(c.nmslib_get_space_type(self.handle, &space_type, &space_type_len, &c_alloc));
-        defer c.nmslib_free_string(@ptrCast(space_type), &c_alloc);
+        defer c.nmslib_free_string(@constCast(space_type), &c_alloc);
         return try self.allocator.dupe(u8, space_type[0..space_type_len]);
     }
 
@@ -484,10 +519,10 @@ pub const Index = struct {
         const c_alloc = c.nmslib_allocator_t{
             .alloc = c_alloc_fn,
             .free = c_free_fn,
-            .ctx = @ptrCast(self.allocator),
+            .ctx = @ptrCast(@constCast(&self.allocator)),
         };
         try mapError(c.nmslib_get_method(self.handle, &method, &method_len, &c_alloc));
-        defer c.nmslib_free_string(@ptrCast(method), &c_alloc);
+        defer c.nmslib_free_string(@constCast(method), &c_alloc);
         return try self.allocator.dupe(u8, method[0..method_len]);
     }
 
@@ -497,11 +532,11 @@ pub const Index = struct {
         const c_alloc = c.nmslib_allocator_t{
             .alloc = c_alloc_fn,
             .free = c_free_fn,
-            .ctx = @ptrCast(self.allocator),
+            .ctx = @ptrCast(@constCast(&self.allocator)),
         };
         try mapError(c.nmslib_get_last_error_detail(&detail, &c_alloc));
-        defer c.nmslib_free_string(@ptrCast(detail.message), &c_alloc);
-        defer c.nmslib_free_string(@ptrCast(detail.file), &c_alloc);
+        defer c.nmslib_free_string(@constCast(detail.message), &c_alloc);
+        defer c.nmslib_free_string(@constCast(detail.file), &c_alloc);
         return .{
             .code = mapError(detail.code) catch |e| e,
             .message = std.mem.span(detail.message),
@@ -527,19 +562,72 @@ pub const Index = struct {
         return error.SpaceIncompatible;
     }
 };
+threadlocal var alloc_tracker: ?*AllocTracker = null;
 
-// C allocator functions
-fn c_alloc_fn(size: usize, ctx: ?*anyopaque) ?*anyopaque {
-    const allocator = @as(Allocator, @ptrCast(ctx orelse return null));
-    const mem = allocator.alloc(u8, size) catch return null;
-    return mem.ptr;
+const AllocTracker = struct {
+    map: std.HashMap(*anyopaque, usize, Context, std.hash_map.default_max_load_percentage),
+    child_allocator: Allocator,
+    const Context = struct {
+        pub fn hash(_: @This(), key: *anyopaque) u64 {
+            return @intFromPtr(key);
+        }
+        pub fn eql(_: @This(), a: *anyopaque, b: *anyopaque) bool {
+            return a == b;
+        }
+    };
+
+    fn init(parent: Allocator) !@This() {
+        const map = std.HashMap(*anyopaque, usize, Context, std.hash_map.default_max_load_percentage).init(parent);
+        return .{ .map = map, .child_allocator = parent };
+    }
+
+    fn deinit(self: *AllocTracker) void {
+        var iter = self.map.iterator();
+        while (iter.next()) |entry| {
+            const len = entry.value_ptr.*;
+            const slice_ptr = @as([*]u8, @ptrCast(entry.key_ptr.*));
+            const slice = slice_ptr[0..len];
+            self.child_allocator.free(slice);
+        }
+        self.map.deinit();
+    }
+};
+
+
+
+fn c_alloc_fn(size: usize, ctx: ?*anyopaque) callconv(.c) ?*anyopaque {
+    if (ctx == null) return null;
+    const alloc_ptr: *Allocator = @alignCast(@ptrCast(ctx.?));
+    const allocator = alloc_ptr.*;
+    if (alloc_tracker == null) {
+        const tracker = allocator.create(AllocTracker) catch return null;
+        tracker.* = AllocTracker.init(allocator) catch {
+            allocator.destroy(tracker);
+            return null;
+        };
+        alloc_tracker = tracker;
+    }
+    const mem_slice = allocator.alloc(u8, size) catch return null;
+    const ptr = @as(*anyopaque, @ptrCast(mem_slice.ptr));
+    alloc_tracker.?.map.put(ptr, size) catch {
+        allocator.free(mem_slice);
+        return null;
+    };
+    return ptr;
 }
 
-fn c_free_fn(ptr: ?*anyopaque, ctx: ?*anyopaque) void {
-    if (ptr == null) return;
-    const allocator = @as(Allocator, @ptrCast(ctx orelse return));
-    const slice = @as([*]u8, @ptrCast(ptr))[0..1]; // Length unknown, use minimal slice
-    allocator.free(slice);
+fn c_free_fn(ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.c) void {
+    if (ptr == null or ctx == null) return;
+    const alloc_ptr: *Allocator = @alignCast(@ptrCast(ctx.?));
+    const allocator = alloc_ptr.*;
+    if (alloc_tracker) |tracker| {
+        if (tracker.map.get(ptr.?)) |len| {
+            const slice_ptr = @as([*]u8, @ptrCast(ptr.?));
+            const slice = slice_ptr[0..len];
+            allocator.free(slice);
+            _ = tracker.map.remove(ptr.?);
+        }
+    }
 }
 
 // Tests
@@ -570,8 +658,8 @@ test "Index dense vector workflow" {
     defer allocator.free(method);
     try testing.expectEqualStrings("hnsw", method);
 
-    const query = [_]f32{ 1.0, 0.0, 0.0, 0.0 };
-    const result = try index.knnQuery(&query, 2);
+    const query = QueryPoint{ .DenseVector = &[_]f32{ 1.0, 0.0, 0.0, 0.0 } };
+    const result = try index.knnQuery(query, 2);
     defer result.deinit();
     try testing.expectEqual(2, result.ids.len);
     try testing.expectApproxEqAbs(0.0, result.distances[0], 0.0001);
@@ -610,8 +698,8 @@ test "Index sparse vector workflow" {
     try index.addSparseBatch(&data, &ids);
     try index.create(null, false);
 
-    const query = [_]SparseElem{ .{ .id = 0, .value = 1.0 } };
-    const result = try index.knnQuery(&query, 2);
+    const query = QueryPoint{ .SparseVector = &[_]SparseElem{ .{ .id = 0, .value = 1.0 } } };
+    const result = try index.knnQuery(query, 2);
     defer result.deinit();
     try testing.expectEqual(2, result.ids.len);
 
@@ -630,8 +718,8 @@ test "Index uint8 vector workflow" {
     try index.addUInt8Batch(&data, null);
     try index.create(null, false);
 
-    const query = [_]u8{ 255, 0, 0 };
-    const result = try index.knnQuery(&query, 2);
+    const query = QueryPoint{ .DenseUInt8Vector = &[_]u8{ 255, 0, 0 } };
+    const result = try index.knnQuery(query, 2);
     defer result.deinit();
     try testing.expectEqual(2, result.ids.len);
 
@@ -650,7 +738,7 @@ test "Index string data workflow" {
     try index.addStringBatch(&data, null);
     try index.create(null, false);
 
-    const query = "hello";
+    const query = QueryPoint{ .ObjectAsString = "hello" };
     const result = try index.knnQuery(query, 2);
     defer result.deinit();
     try testing.expectEqual(2, result.ids.len);
