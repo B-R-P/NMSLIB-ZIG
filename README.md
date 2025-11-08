@@ -266,8 +266,15 @@ Parameter management for spaces and indexes.
 **Methods:**
 - `init()` - Create new parameter set
 - `deinit()` - Free parameter set
-- `add()` - Add a parameter
+- `add()` - Add a parameter (key: []const u8, value: ParamValue)
+- `has()` - Check if a parameter exists
 - `fromSlice()` - Create from key-value pairs
+
+#### `ParamValue`
+Union type for parameter values:
+- `String` - []const u8 string value
+- `Int` - i32 integer value
+- `Double` - f64 floating-point value
 
 #### `DataType`
 Enum of supported data types:
@@ -280,6 +287,25 @@ Enum of supported data types:
 Enum of distance computation types:
 - `Float` - Floating-point distances
 - `Int` - Integer distances
+
+#### `QueryPoint`
+Union type for query data, tagged by DataType:
+- `DenseVector` - Slice of f32 values
+- `SparseVector` - Slice of SparseElem structs
+- `DenseUInt8Vector` - Slice of u8 values
+- `ObjectAsString` - Slice of u8 (string bytes)
+
+#### `DataPoint`
+Union type for stored data points, tagged by DataType:
+- `DenseVector` - Slice of f32 values
+- `SparseVector` - Slice of SparseElem structs
+- `DenseUInt8Vector` - Slice of u8 values
+- `ObjectAsString` - Slice of u8 (string bytes)
+
+#### `SparseElem`
+Structure for sparse vector elements:
+- `id` - u32 element ID (1-based, must be strictly increasing)
+- `value` - f32 element value
 
 #### `QueryResult`
 Result of a k-NN or range query containing:
