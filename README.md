@@ -50,6 +50,22 @@ zig build
 zig build test
 ```
 
+## Important Notes
+
+### Data Type Requirements
+
+- **Sparse Vectors**: Element IDs must be 1-based (not 0-based), positive, and strictly increasing within each vector. This is a requirement of the underlying NMSLIB library.
+- **Dense Vectors**: Require a `dim` parameter specifying dimensionality for L2 and cosine spaces.
+- **Dense UInt8 Vectors**: Require integer distance type (`.Int`) and are optimized for SIFT-style descriptors.
+- **String Objects**: Levenshtein distance (`"leven"`) requires integer distance type (`.Int`).
+
+### Space and Distance Type Compatibility
+
+Certain space types require specific distance types:
+- `"leven"` (Levenshtein) → `.Int` distance type only
+- `"l2sqr_sift"` → `.Int` distance type and 128-D uint8 vectors
+- Vector spaces (`"l2"`, `"l2sqr"`, `"cosine"`) → require `"dim"` parameter
+
 ## Usage
 
 ### Basic Example: Dense Vector Search
@@ -66,7 +82,7 @@ pub fn main() !void {
     // Create space parameters (specify dimensionality)
     var params = try nmslib.Params.init(allocator);
     defer params.deinit();
-    try params.add("dim", .{ .Int = 128 });
+    try params.add("dim", .{ .Int = 4 });
 
     // Create index with L2 distance and HNSW method
     var index = try nmslib.Index.init(
@@ -89,7 +105,7 @@ pub fn main() !void {
     try index.addDenseBatch(&data, &ids);
 
     // Build the index
-    try index.create(null, false);
+    try index.buildIndex(null, false);
 
     // Perform k-NN query
     const query = nmslib.QueryPoint{ .DenseVector = &[_]f32{ 1.0, 0.1, 0.0, 0.0 } };
@@ -119,23 +135,24 @@ var index = try nmslib.Index.init(
 defer index.deinit();
 
 // Sparse vectors as arrays of {id, value} pairs
+// Note: IDs must be 1-based, positive, and strictly increasing (NMSLIB requirement)
 const data = [_][]const nmslib.SparseElem{
     &[_]nmslib.SparseElem{
-        .{ .id = 0, .value = 1.0 },
+        .{ .id = 1, .value = 1.0 },
         .{ .id = 5, .value = 2.0 },
     },
     &[_]nmslib.SparseElem{
-        .{ .id = 1, .value = 1.0 },
+        .{ .id = 2, .value = 1.0 },
         .{ .id = 10, .value = 3.0 },
     },
 };
 
 try index.addSparseBatch(&data, null);
-try index.create(null, false);
+try index.buildIndex(null, false);
 
 const query = nmslib.QueryPoint{
     .SparseVector = &[_]nmslib.SparseElem{
-        .{ .id = 0, .value = 1.0 }
+        .{ .id = 1, .value = 1.0 }
     }
 };
 const result = try index.knnQuery(query, 5);
@@ -151,13 +168,13 @@ var index = try nmslib.Index.init(
     null,
     "hnsw",
     .ObjectAsString,
-    .Float
+    .Int            // Levenshtein requires integer distance type
 );
 defer index.deinit();
 
 const data = [_][]const u8{ "hello", "world", "test" };
 try index.addStringBatch(&data, null);
-try index.create(null, false);
+try index.buildIndex(null, false);
 
 const query = nmslib.QueryPoint{ .ObjectAsString = "hello" };
 const result = try index.knnQuery(query, 2);
@@ -189,6 +206,7 @@ const queries = [_][]const f32{
     &[_]f32{ 0.0, 1.0, 0.0 },
 };
 
+// Note: thread_pool_size parameter is currently unused in the implementation
 const batch_result = try index.knnQueryBatch(&queries, 10, null);
 defer batch_result.deinit();
 
@@ -201,6 +219,7 @@ for (batch_result.results, 0..) |result, i| {
 
 ```zig
 // Find all points within a distance radius
+// Note: Only works with DenseVector data type
 const query = &[_]f32{ 1.0, 0.0, 0.0 };
 const result = try index.rangeQuery(query, 0.5); // radius = 0.5
 defer result.deinit();
@@ -216,11 +235,13 @@ The main index structure for similarity search.
 **Methods:**
 - `init()` - Create a new index
 - `deinit()` - Free the index
+- `reset()` - Reset the index and clear data storage
 - `addDenseBatch()` - Add dense vector batch
-- `addSparseBatch()` - Add sparse vector batch
+- `addSparseBatch()` - Add sparse vector batch (IDs must be 1-based, positive, strictly increasing)
 - `addUInt8Batch()` - Add uint8 vector batch
 - `addStringBatch()` - Add string data batch
-- `create()` - Build the index structure
+- `buildIndex()` - Build the index structure
+- `clearIndexCache()` - Clear the built index cache
 - `knnQuery()` - Perform k-nearest neighbor query
 - `knnQueryBatch()` - Batch k-NN queries
 - `rangeQuery()` - Find all neighbors within radius
@@ -228,7 +249,16 @@ The main index structure for similarity search.
 - `load()` - Load index from disk
 - `getDistance()` - Get distance between two points
 - `getDataPoint()` - Retrieve a data point
+- `borrowDataPointString()` - Borrow string data point (no copy)
+- `borrowDataDense()` - Borrow dense vector data point (no copy)
+- `borrowDataSparse()` - Borrow sparse vector data point (no copy)
 - `dataQty()` - Get number of data points
+- `setQueryTimeParams()` - Set query-time parameters
+- `setThreadPoolSize()` - Configure thread pool size
+- `getThreadPoolSize()` - Get current thread pool size
+- `getSpaceType()` - Get the space type string
+- `getMethod()` - Get the indexing method string
+- `getDataType()` - Get the data type enum
 
 #### `Params`
 Parameter management for spaces and indexes.
@@ -236,8 +266,15 @@ Parameter management for spaces and indexes.
 **Methods:**
 - `init()` - Create new parameter set
 - `deinit()` - Free parameter set
-- `add()` - Add a parameter
+- `add()` - Add a parameter (key: []const u8, value: ParamValue)
+- `has()` - Check if a parameter exists
 - `fromSlice()` - Create from key-value pairs
+
+#### `ParamValue`
+Union type for parameter values:
+- `String` - []const u8 string value
+- `Int` - i32 integer value
+- `Double` - f64 floating-point value
 
 #### `DataType`
 Enum of supported data types:
@@ -251,11 +288,40 @@ Enum of distance computation types:
 - `Float` - Floating-point distances
 - `Int` - Integer distances
 
+#### `QueryPoint`
+Union type for query data, tagged by DataType:
+- `DenseVector` - Slice of f32 values
+- `SparseVector` - Slice of SparseElem structs
+- `DenseUInt8Vector` - Slice of u8 values
+- `ObjectAsString` - Slice of u8 (string bytes)
+
+#### `DataPoint`
+Union type for stored data points, tagged by DataType:
+- `DenseVector` - Slice of f32 values
+- `SparseVector` - Slice of SparseElem structs
+- `DenseUInt8Vector` - Slice of u8 values
+- `ObjectAsString` - Slice of u8 (string bytes)
+
+#### `SparseElem`
+Structure for sparse vector elements:
+- `id` - u32 element ID (1-based, must be strictly increasing)
+- `value` - f32 element value
+
 #### `QueryResult`
 Result of a k-NN or range query containing:
-- `ids` - Array of result IDs
-- `distances` - Array of distances
+- `ids` - Slice of result IDs (trimmed to actual results)
+- `distances` - Slice of distances (trimmed to actual results)
+- `full_ids` - Full allocated buffer for IDs
+- `full_distances` - Full allocated buffer for distances
+- `used` - Number of results returned
+- `allocator` - Allocator used for memory management
 - `deinit()` - Free the result
+
+#### `BatchResult`
+Result of batch k-NN queries containing:
+- `results` - Array of QueryResult structures (one per query)
+- `allocator` - Allocator used for memory management
+- `deinit()` - Free all results and the array
 
 ### Supported Space Types
 
@@ -282,6 +348,7 @@ pub const Error = error{
     NullPointer,
     InvalidArgument,
     OutOfMemory,
+    BufferTooSmall,
     SpaceIncompatible,
     QueryTooLarge,
     InvalidSparseElement,
@@ -291,6 +358,8 @@ pub const Error = error{
     PluginRegistrationFailed,
     Internal,
     Runtime,
+    IndexNotBuilt,
+    IndexAlreadyBuilt,
 };
 ```
 
