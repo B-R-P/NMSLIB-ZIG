@@ -37,8 +37,16 @@ typedef enum {
     NMSLIB_ERROR_DATA_IO_FAILED = 10,
     NMSLIB_ERROR_PLUGIN_REGISTRATION_FAILED = 11,
     NMSLIB_ERROR_INTERNAL = 12,
-    NMSLIB_ERROR_RUNTIME = 13
+    NMSLIB_ERROR_RUNTIME = 13,
+    NMSLIB_ERROR_INDEX_NOT_BUILT = 14
 } nmslib_error_t;
+
+// Data mode for pointer-based batch addition
+typedef enum {
+    NMSLIB_DATA_MODE_DENSE_FLOAT = 0,
+    NMSLIB_DATA_MODE_SPARSE = 1,
+    NMSLIB_DATA_MODE_UINT8 = 2
+} nmslib_data_mode_t;
 
 // Sparse element structure
 typedef struct {
@@ -69,11 +77,22 @@ typedef struct {
     int line;
 } nmslib_error_detail_t;
 
+typedef struct {
+    nmslib_data_type_t data_type;
+    nmslib_dist_type_t dist_type;
+} nmslib_index_header_t;
+
+
 // Opaque handle for the NMSLIB index
 typedef struct nmslib_index_t* nmslib_index_handle_t;
 
 // Opaque handle for the NMSLIB parameters
 typedef struct nmslib_params_t* nmslib_params_handle_t;
+
+// Ensure NMSLIB registration of spaces/methods is performed.
+// Call from Zig if you want explicit control; the C++ wrapper also
+// performs a one-time init before creating an index.
+void nmslib_init(void);
 
 /**
  * Creates a new NMSLIB index with the specified parameters.
@@ -139,7 +158,7 @@ nmslib_params_handle_t nmslib_create_params(const nmslib_allocator_t* allocator)
  *
  * @param params The parameters handle.
  * @param name The name of the parameter.
- * @param type The type of the parameter.
+ * @param type The type of the parameter (0=int, 1=double, 2=string).
  * @param value The value of the parameter.
  * @return Error code indicating success or failure.
  */
@@ -161,8 +180,8 @@ void nmslib_free_params(nmslib_params_handle_t params);
  * Gets the space type of an NMSLIB index.
  *
  * @param index The index handle.
- * @param space_type Pointer to store the space type.
- * @param space_type_len Pointer to store the length of the space type.
+ * @param space_type Pointer to store the space type string.
+ * @param space_type_len Pointer to store the length of the space type string.
  * @param allocator The allocator to use for memory management.
  * @return Error code indicating success or failure.
  */
@@ -177,8 +196,8 @@ nmslib_error_t nmslib_get_space_type(
  * Gets the method of an NMSLIB index.
  *
  * @param index The index handle.
- * @param method Pointer to store the method.
- * @param method_len Pointer to store the length of the method.
+ * @param method Pointer to store the method string.
+ * @param method_len Pointer to store the length of the method string.
  * @param allocator The allocator to use for memory management.
  * @return Error code indicating success or failure.
  */
@@ -229,11 +248,11 @@ nmslib_error_t nmslib_add_data_point(
  * Adds a batch of data points to the NMSLIB index.
  *
  * @param index The index handle.
- * @param data The data points to add.
+ * @param data The data points to add (flat buffer).
  * @param count The number of data points to add.
- * @param element_count The number of elements in each data point.
- * @param ids The IDs of the data points.
- * @param num_elements The number of elements in each sparse data point.
+ * @param element_count The number of elements in each data point (dim for dense).
+ * @param ids The IDs of the data points (NULL for auto).
+ * @param num_elements The number of elements in each sparse data point (NULL for dense).
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_add_data_point_batch(
@@ -249,10 +268,10 @@ nmslib_error_t nmslib_add_data_point_batch(
  * Adds a batch of uint8 data points to the NMSLIB index.
  *
  * @param index The index handle.
- * @param data The data points to add.
+ * @param data The data points to add (flat buffer).
  * @param count The number of data points to add.
  * @param element_count The number of elements in each data point.
- * @param ids The IDs of the data points.
+ * @param ids The IDs of the data points (NULL for auto).
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_add_data_point_batch_uint8(
@@ -267,9 +286,9 @@ nmslib_error_t nmslib_add_data_point_batch_uint8(
  * Adds a batch of string data points to the NMSLIB index.
  *
  * @param index The index handle.
- * @param data The data points to add.
+ * @param data The data points to add (array of const char*).
  * @param count The number of data points to add.
- * @param ids The IDs of the data points.
+ * @param ids The IDs of the data points (NULL for auto).
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_add_data_point_batch_string(
@@ -287,7 +306,7 @@ nmslib_error_t nmslib_add_data_point_batch_string(
  * @param query_size_or_elem_count The size or element count of the query.
  * @param k The number of nearest neighbors to find.
  * @param out_size Pointer to store the required size.
- * @param num_elements The number of elements in the query.
+ * @param num_elements The number of elements in the query (for sparse).
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_knn_query_get_size(
@@ -307,7 +326,7 @@ nmslib_error_t nmslib_knn_query_get_size(
  * @param query_size_or_elem_count The size or element count of the query.
  * @param k The number of nearest neighbors to find.
  * @param result Pointer to store the result.
- * @param num_elements The number of elements in the query.
+ * @param num_elements The number of elements in the query (for sparse).
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_knn_query_fill(
@@ -323,12 +342,12 @@ nmslib_error_t nmslib_knn_query_fill(
  * Performs a batch k-NN query.
  *
  * @param index The index handle.
- * @param queries The query data points.
+ * @param queries The query data points (flat buffer).
  * @param query_count The number of queries.
  * @param query_size_or_elem_count The size or element count of each query.
  * @param k The number of nearest neighbors to find.
  * @param results Pointer to store the results.
- * @param num_elements The number of elements in each query.
+ * @param num_elements The number of elements in each query (for sparse).
  * @param thread_pool_size The size of the thread pool.
  * @return Error code indicating success or failure.
  */
@@ -351,7 +370,7 @@ nmslib_error_t nmslib_knn_query_batch(
  * @param query_size_or_elem_count The size or element count of the query.
  * @param radius The radius for the range query.
  * @param out_size Pointer to store the required size.
- * @param num_elements The number of elements in the query.
+ * @param num_elements The number of elements in the query (for sparse).
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_range_query_get_size(
@@ -371,7 +390,7 @@ nmslib_error_t nmslib_range_query_get_size(
  * @param query_size_or_elem_count The size or element count of the query.
  * @param radius The radius for the range query.
  * @param result Pointer to store the result.
- * @param num_elements The number of elements in the query.
+ * @param num_elements The number of elements in the query (for sparse).
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_range_query_fill(
@@ -556,6 +575,45 @@ size_t nmslib_get_thread_pool_size(nmslib_index_handle_t index);
  * @return The number of data points.
  */
 size_t nmslib_data_qty(nmslib_index_handle_t index);
+
+/**
+ * Gets an approximate memory usage of the NMSLIB index in bytes.
+ * Includes data buffers and internal structures (e.g., graph edges).
+ * Returns 0 for invalid or unbuilt indexes.
+ *
+ * @param handle The index handle.
+ * @return Approximate memory usage in bytes.
+ */
+size_t nmslib_index_memory_usage(nmslib_index_handle_t handle);
+
+/**
+ * Adds a batch of data points to the NMSLIB index using borrowed pointers (zero-copy).
+ * Call before nmslib_create_index. For strings, use the legacy batch_string function.
+ *
+ * @param handle The index handle.
+ * @param data_mode The mode: NMSLIB_DATA_MODE_DENSE_FLOAT (0), SPARSE (1), UINT8 (2).
+ * @param data_ptrs Array of pointers to each data point (cast to void**; e.g., const float** for dense).
+ * @param count The number of data points.
+ * @param element_count Dimension for dense/uint8 (0 for sparse).
+ * @param ids The IDs (NULL for auto).
+ * @param num_elements Per-point element counts for sparse (NULL otherwise).
+ * @return Error code indicating success or failure.
+ */
+nmslib_error_t nmslib_add_data_point_batch_pointers(
+    nmslib_index_handle_t handle,
+    nmslib_data_mode_t data_mode,
+    const void *const *data_ptrs,
+    size_t count,
+    size_t element_count,
+    const int32_t* ids,
+    const size_t* num_elements
+);
+
+
+// Ensure HNSW internal visited-list pool is initialized for the given index handle.
+void nmslib_initialize_pool(nmslib_index_handle_t index);
+
+
 
 #ifdef __cplusplus
 }

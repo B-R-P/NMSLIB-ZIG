@@ -66,8 +66,8 @@ pub fn build(b: *std.Build) void {
         "src/space/space_word_embed.cc",
     };
 
-    // Clang/GCC flags for non-Windows and GNU ABI on Windows
-    const cpp_flags = &[_][]const u8{
+    // Flags for library (performance-oriented)
+    const cpp_flags_lib = &[_][]const u8{
         "-std=c++17",
         "-O3",
         "-flto",
@@ -80,6 +80,24 @@ pub fn build(b: *std.Build) void {
         "-pthread",
         "-Wl,-z,now",
     };
+
+    // Flags for tests (debug-oriented, no LTO to ensure static init)
+    const cpp_flags_test = &[_][]const u8{
+        "-std=c++17",
+        "-O0",
+        "-g",
+        // prefer explicit DWARF (strong hint to Clang/LLVM when using MinGW)
+        "-gdwarf-4",
+        // keep frame pointers so backtraces are reliable
+        "-fno-omit-frame-pointer",
+        "-fexceptions",
+        "-fPIC",
+        "-march=native",
+        "-fopenmp",
+        "-pthread",
+        "-fno-function-sections",
+    };
+
 
     // Create the root module for the library
     const root_module = b.createModule(.{
@@ -98,18 +116,17 @@ pub fn build(b: *std.Build) void {
     // Add NMSLIB sources + wrapper
     lib.addCSourceFiles(.{
         .files = nmslib_sources ++ &[_][]const u8{ "nmslib_c.cpp" },
-        .flags = cpp_flags,
+        .flags = cpp_flags_lib,
     });
 
     // Add include directories (from setup.py and existing build.zig)
-    lib.addIncludePath(b.path(".")); // For nmslib_c.h
+    lib.addIncludePath(b.path("."));
     lib.addIncludePath(b.path("include"));
     lib.addIncludePath(b.path("include/factory"));
     lib.addIncludePath(b.path("include/method"));
     lib.addIncludePath(b.path("include/space"));
 
     lib.linkLibCpp();
-    lib.linkSystemLibrary("winpthread");  // For OpenMP threading on Windows GNU
 
     // Install the library
     b.installArtifact(lib);
@@ -127,10 +144,10 @@ pub fn build(b: *std.Build) void {
         .root_module = test_module,
     });
 
-    // Configure test includes and sources (same as lib)
+    // Configure test includes and sources (same as lib, but with test flags)
     tests.addCSourceFiles(.{
         .files = nmslib_sources ++ &[_][]const u8{ "nmslib_c.cpp" },
-        .flags = cpp_flags,
+        .flags = cpp_flags_test,
     });
     tests.addIncludePath(b.path("."));
     tests.addIncludePath(b.path("include"));
@@ -138,7 +155,6 @@ pub fn build(b: *std.Build) void {
     tests.addIncludePath(b.path("include/method"));
     tests.addIncludePath(b.path("include/space"));
     tests.linkLibCpp();
-    tests.linkSystemLibrary("winpthread");  // For OpenMP threading on Windows GNU
 
     // Create a run step for tests
     const run_tests = b.addRunArtifact(tests);
