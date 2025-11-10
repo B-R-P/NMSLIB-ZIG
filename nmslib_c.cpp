@@ -4,10 +4,8 @@
 #include <string>
 #include <vector>
 #include <thread>
-#include <atomic>
-#include <queue>
-#include <mutex>
-#include <numeric>
+#include <type_traits>
+#include <functional>
 #include "space.h"
 #include "space/space_sparse_vector.h"
 #include "space/space_l2sqr_sift.h"
@@ -80,7 +78,6 @@ namespace NMSLIBUtil {
         if (count == 0) return NMSLIB_ERROR_INVALID_ARGUMENT;
         for (size_t i = 0; i < count; ++i) {
             if (!data_ptrs[i]) return NMSLIB_ERROR_NULL_POINTER;
-            // Basic uniformity check (heuristic; full in mode-specific)
             if (element_count > 0 && element_count < 1) return NMSLIB_ERROR_INVALID_ARGUMENT;
         }
         return NMSLIB_SUCCESS;
@@ -117,15 +114,11 @@ public:
     ~BorrowedObject() {}
 };
 
-
 // Wrapper structure for NMSLIB parameters
 struct nmslib_params_wrapper_t {
     std::vector<std::string> params;
     nmslib_allocator_t allocator;
-
-    ~nmslib_params_wrapper_t() = default;
 };
-
 
 template <typename dist_t>
 struct nmslib_internal_index_t {
@@ -155,54 +148,152 @@ struct nmslib_internal_index_t {
     }
 };
 
-
-
 static AnyParams load_params(const nmslib_params_wrapper_t* params) {
     if (!params) return AnyParams();
     return AnyParams(params->params);
 }
-// ---- add dispatch helper near the top of nmslib_c.cpp ----
 
+// Dispatch helper - templated to support different return types
 template <typename Fn>
-nmslib_error_t dispatch_index_by_data_type(nmslib_index_handle_t handle, Fn&& fn) {
+auto dispatch_index_by_data_type(nmslib_index_handle_t handle, Fn&& fn) -> std::invoke_result_t<Fn, nmslib_internal_index_t<float>*> {
+    using RetT = std::invoke_result_t<Fn, nmslib_internal_index_t<float>*>;
     if (!handle) {
-        SET_LAST_ERROR(NMSLIB_ERROR_NULL_POINTER, "Null index handle");
-        return NMSLIB_ERROR_NULL_POINTER;
+        if constexpr (std::is_same_v<RetT, nmslib_error_t>) {
+            SET_LAST_ERROR(NMSLIB_ERROR_NULL_POINTER, "Null index handle");
+            return NMSLIB_ERROR_NULL_POINTER;
+        } else if constexpr (std::is_same_v<RetT, size_t>) {
+            return static_cast<size_t>(0);
+        } else if constexpr (std::is_void_v<RetT>) {
+            return;
+        } else {
+            static_assert(false, "Unsupported return type in dispatch");
+        }
     }
 
-    // header is placed at the very start of every nmslib_internal_index_t<T> instantiation
     auto hdr = reinterpret_cast<nmslib_index_header_t*>(handle);
     switch (hdr->data_type) {
-        // treat float-typed indices (dense/sparse float vectors)
         case NMSLIB_DATATYPE_DENSE_VECTOR:
         case NMSLIB_DATATYPE_SPARSE_VECTOR: {
             auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-            return fn(idx);
+            return std::forward<Fn>(fn)(idx);
         }
-
-        // treat int-typed indices (SIFT/uint8 & string/object-as-string use int registry in this codebase)
         case NMSLIB_DATATYPE_DENSE_UINT8_VECTOR:
         case NMSLIB_DATATYPE_OBJECT_AS_STRING: {
             auto idx = reinterpret_cast<nmslib_internal_index_t<int>*>(handle);
-            return fn(idx);
+            return std::forward<Fn>(fn)(idx);
         }
-
-        default:
-            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Unsupported data type");
-            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+        default: {
+            if constexpr (std::is_same_v<RetT, nmslib_error_t>) {
+                SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Unsupported data type");
+                return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+            } else if constexpr (std::is_same_v<RetT, size_t>) {
+                return static_cast<size_t>(0);
+            } else if constexpr (std::is_void_v<RetT>) {
+                return;
+            } else {
+                static_assert(false, "Unsupported return type in dispatch");
+            }
+        }
     }
 }
+
+// Consolidated helper for creating query/data objects
+// Consolidated helper for creating query/data objects
+template <typename dist_t>
+std::unique_ptr<Object> create_object(const Space<dist_t>* space, nmslib_data_type_t data_type, const void* data, size_t elem_count, size_t num_elements, int32_t id) {
+    std::unique_ptr<Object> obj;
+    switch (data_type) {
+        case NMSLIB_DATATYPE_DENSE_VECTOR: {
+            const float* vec = static_cast<const float*>(data);
+            auto vectSpace = dynamic_cast<const VectorSpaceSimpleStorage<float>*>(space);
+            if (!vectSpace) return nullptr;
+            std::vector<float> tempVec(vec, vec + elem_count);
+            obj.reset(vectSpace->CreateObjFromVect(static_cast<IdType>(id), static_cast<LabelType>(-1), tempVec));
+            break;
+        }
+        case NMSLIB_DATATYPE_SPARSE_VECTOR: {
+            const nmslib_sparse_elem_float_t* elems = static_cast<const nmslib_sparse_elem_float_t*>(data);
+            if (nmslib_error_t err = NMSLIBUtil::validate_sparse_elements(elems, num_elements, true)) {
+                SET_LAST_ERROR(err, "Invalid sparse elements");
+                return nullptr;
+            }
+            std::vector<SparseVectElem<float>> tempVec(num_elements);
+            for (size_t j = 0; j < num_elements; ++j) {
+                tempVec[j].id_ = elems[j].id;
+                tempVec[j].val_ = elems[j].value;
+            }
+            auto sparseSpace = dynamic_cast<const SpaceSparseVectorSimpleStorage<float>*>(space);
+            if (!sparseSpace) return nullptr;
+            obj.reset(sparseSpace->CreateObjFromVect(static_cast<IdType>(id), static_cast<LabelType>(-1), tempVec));
+            break;
+        }
+        case NMSLIB_DATATYPE_DENSE_UINT8_VECTOR: {
+            const uint8_t* u8data = static_cast<const uint8_t*>(data);
+            auto siftSpace = dynamic_cast<const SpaceL2SqrSift*>(space);
+            if (!siftSpace) return nullptr;
+            std::vector<uint8_t> u8vec(u8data, u8data + elem_count);
+            obj.reset(siftSpace->CreateObjFromUint8Vect(static_cast<IdType>(id), static_cast<LabelType>(-1), u8vec));
+            break;
+        }
+        case NMSLIB_DATATYPE_OBJECT_AS_STRING: {
+            const char* str_data = static_cast<const char*>(data);
+            std::string str(str_data, elem_count > 0 ? elem_count - 1 : std::strlen(str_data));
+            auto temp_obj = space->CreateObjFromStr(static_cast<IdType>(id), static_cast<LabelType>(-1), str, nullptr);
+            if (temp_obj) {
+                obj = std::move(temp_obj);
+            }
+            break;
+        }
+        default:
+            return nullptr;
+    }
+    return obj;
+}
+// Helper for KNN result extraction
+template <typename dist_t>
+void extract_knn_results(const KNNQueue<dist_t>* res, nmslib_result_t* result) {
+    if (!res) {
+        result->size = 0;
+        SET_LAST_ERROR(NMSLIB_ERROR_QUERY_EXECUTION_FAILED, "Query result missing");
+        return;
+    }
+    size_t found = res->Size();
+    result->size = found;
+    if (found == 0) {
+        SET_LAST_ERROR(NMSLIB_SUCCESS, "No neighbors found");
+        return;
+    }
+    if (found > result->capacity) {
+        SET_LAST_ERROR(NMSLIB_ERROR_BUFFER_TOO_SMALL, "Result buffers too small for " + std::to_string(found));
+        result->size = 0;
+        return;
+    }
+    auto cloneQueue = res->Clone();
+    std::vector<std::pair<int32_t, float>> tmp; tmp.reserve(found);
+    while (!cloneQueue->Empty()) {
+        float d = static_cast<float>(cloneQueue->TopDistance());
+        const Object* o = cloneQueue->TopObject();
+        tmp.emplace_back(static_cast<int32_t>(o->id()), d);
+        cloneQueue->Pop();
+    }
+    delete cloneQueue;
+    std::reverse(tmp.begin(), tmp.end());
+    for (size_t i = 0; i < found; ++i) {
+        result->ids[i] = tmp[i].first;
+        result->distances[i] = tmp[i].second;
+    }
+}
+
+static const AnyParams defaultQueryParams = AnyParams({"efSearch=200"});
 
 extern "C" {
 __attribute__((constructor))
 static void nmslib_force_space_registry_init() {
-    // Touch the factory singletons to make sure static registration runs
     (void) similarity::SpaceFactoryRegistry<float>::Instance();
     (void) similarity::SpaceFactoryRegistry<int>::Instance();
     (void) similarity::SpaceFactoryRegistry<size_t>::Instance();
 }
 
-// Exported C-callable init function (optional: call this from Zig during startup)
 void nmslib_init(void) {
     std::call_once(nmslib_init_flag, nmslib_do_init);
 }
@@ -221,11 +312,9 @@ nmslib_error_t nmslib_index_create(
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
 
-    // one-time initialization of NMSLIB
     std::call_once(nmslib_init_flag, nmslib_do_init);
 
     try {
-        // --- Try FLOAT registry first (most spaces are registered here) ---
         {
             void* mem = allocator->alloc(sizeof(nmslib_internal_index_t<float>), allocator->ctx);
             if (!mem) {
@@ -246,17 +335,13 @@ nmslib_error_t nmslib_index_create(
                     return NMSLIB_SUCCESS;
                 }
             } catch (const std::exception& e) {
-                // fall through to fallback
             } catch (...) {
-                // fall through to fallback
             }
 
-            // cleanup float idx before attempting fallback
             idx->~nmslib_internal_index_t();
             allocator->free(mem, allocator->ctx);
         }
 
-        // --- Fallback: try INT registry ---
         {
             void* mem = allocator->alloc(sizeof(nmslib_internal_index_t<int>), allocator->ctx);
             if (!mem) {
@@ -309,7 +394,6 @@ nmslib_error_t nmslib_index_create(
 void nmslib_index_destroy(nmslib_index_handle_t handle) {
     if (!handle) return;
 
-    // Read header to know which instantiation we are destroying
     auto hdr = reinterpret_cast<nmslib_index_header_t*>(handle);
     switch (hdr->data_type) {
         case NMSLIB_DATATYPE_DENSE_VECTOR:
@@ -327,7 +411,6 @@ void nmslib_index_destroy(nmslib_index_handle_t handle) {
             break;
         }
         default: {
-            // Best-effort fallback: attempt float destroy (keeps prior behavior)
             auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
             idx->~nmslib_internal_index_t<float>();
             idx->allocator.free(idx, idx->allocator.ctx);
@@ -347,43 +430,25 @@ nmslib_error_t nmslib_create_index(
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
 
-    // Use header to dispatch to correct template
-    auto hdr = reinterpret_cast<nmslib_index_header_t*>(handle);
-
-    try {
-        switch (hdr->data_type) {
-            case NMSLIB_DATATYPE_DENSE_VECTOR:
-            case NMSLIB_DATATYPE_SPARSE_VECTOR: {
-                auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-                auto factory = MethodFactoryRegistry<float>::Instance();
-                idx->index_ptr.reset(factory.CreateMethod(print_progress != 0, idx->method, idx->space_type, *idx->space, idx->data));
-                idx->index_ptr->CreateIndex(load_params(reinterpret_cast<nmslib_params_wrapper_t*>(index_params)));
-                SET_LAST_ERROR(NMSLIB_SUCCESS, "Index created successfully");
-                return NMSLIB_SUCCESS;
-            }
-            case NMSLIB_DATATYPE_DENSE_UINT8_VECTOR:
-            case NMSLIB_DATATYPE_OBJECT_AS_STRING: {
-                auto idx = reinterpret_cast<nmslib_internal_index_t<int>*>(handle);
-                auto factory = MethodFactoryRegistry<int>::Instance();
-                idx->index_ptr.reset(factory.CreateMethod(print_progress != 0, idx->method, idx->space_type, *idx->space, idx->data));
-                idx->index_ptr->CreateIndex(load_params(reinterpret_cast<nmslib_params_wrapper_t*>(index_params)));
-                SET_LAST_ERROR(NMSLIB_SUCCESS, "Index created successfully (int)");
-                return NMSLIB_SUCCESS;
-            }
-            default:
-                SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "No compatible space found for header data_type");
-                return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+    return dispatch_index_by_data_type(handle, [index_params, print_progress](auto* idx) -> nmslib_error_t {
+        using dist_t = decltype(idx->space->IndexTimeDistance(static_cast<const Object*>(nullptr), static_cast<const Object*>(nullptr)));
+        try {
+            auto factory = MethodFactoryRegistry<dist_t>::Instance();
+            idx->index_ptr.reset(factory.CreateMethod(print_progress != 0, idx->method, idx->space_type, *idx->space, idx->data));
+            idx->index_ptr->CreateIndex(load_params(reinterpret_cast<nmslib_params_wrapper_t*>(index_params)));
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Index created successfully");
+            return NMSLIB_SUCCESS;
+        } catch (const std::bad_alloc& e) {
+            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Memory allocation failed: " + std::string(e.what()));
+            return NMSLIB_ERROR_OUT_OF_MEMORY;
+        } catch (const std::exception& e) {
+            SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Failed to create index: " + std::string(e.what()));
+            return NMSLIB_ERROR_INDEX_BUILD_FAILED;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Failed to create index (unknown error)");
+            return NMSLIB_ERROR_INDEX_BUILD_FAILED;
         }
-    } catch (const std::bad_alloc& e) {
-        SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Memory allocation failed: " + std::string(e.what()));
-        return NMSLIB_ERROR_OUT_OF_MEMORY;
-    } catch (const std::exception& e) {
-        SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Failed to create index: " + std::string(e.what()));
-        return NMSLIB_ERROR_INDEX_BUILD_FAILED;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Failed to create index (unknown error)");
-        return NMSLIB_ERROR_INDEX_BUILD_FAILED;
-    }
+    });
 }
 
 
@@ -392,19 +457,20 @@ nmslib_error_t nmslib_reset_index(nmslib_index_handle_t handle) {
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid index");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        for (auto datum : idx->data) {
-            delete datum;
+    return dispatch_index_by_data_type(handle, [](auto* idx) -> nmslib_error_t {
+        try {
+            for (auto datum : idx->data) {
+                delete datum;
+            }
+            idx->data.clear();
+            idx->index_ptr.reset();
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Index reset successfully");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to reset index");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        idx->data.clear();
-        idx->index_ptr.reset();
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Index reset successfully");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to reset index");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 nmslib_params_handle_t nmslib_create_params(const nmslib_allocator_t* allocator) {
@@ -482,20 +548,21 @@ nmslib_error_t nmslib_get_space_type(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid arguments");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        *space_type_len = idx->space_type.length(); // ✅ FIX: exclude the null terminator
-        *space_type = NMSLIBUtil::dup_string(idx->space_type, allocator);
-        if (!*space_type) {
-            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate memory for space type");
-            return NMSLIB_ERROR_OUT_OF_MEMORY;
+    return dispatch_index_by_data_type(handle, [space_type, space_type_len, allocator](auto* idx) -> nmslib_error_t {
+        try {
+            *space_type_len = idx->space_type.length();
+            *space_type = NMSLIBUtil::dup_string(idx->space_type, allocator);
+            if (!*space_type) {
+                SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate memory for space type");
+                return NMSLIB_ERROR_OUT_OF_MEMORY;
+            }
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Space type retrieved successfully");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to get space type");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Space type retrieved successfully");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to get space type");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 
@@ -509,21 +576,21 @@ nmslib_error_t nmslib_get_method(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid arguments");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        // FIX: return length excluding terminating NUL so caller can form a slice without trailing '\0'
-        *method_len = idx->method.length();
-        *method = NMSLIBUtil::dup_string(idx->method, allocator);
-        if (!*method) {
-            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate memory for method");
-            return NMSLIB_ERROR_OUT_OF_MEMORY;
+    return dispatch_index_by_data_type(handle, [method, method_len, allocator](auto* idx) -> nmslib_error_t {
+        try {
+            *method_len = idx->method.length();
+            *method = NMSLIBUtil::dup_string(idx->method, allocator);
+            if (!*method) {
+                SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate memory for method");
+                return NMSLIB_ERROR_OUT_OF_MEMORY;
+            }
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Method retrieved successfully");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to get method");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Method retrieved successfully");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to get method");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 
@@ -575,81 +642,24 @@ nmslib_error_t nmslib_add_data_point(
         SET_LAST_ERROR(err, "Invalid inputs for adding data point");
         return err;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        std::unique_ptr<Object> obj;
-        switch (idx->data_type) {
-            case NMSLIB_DATATYPE_DENSE_VECTOR: {
-                const float* vec = static_cast<const float*>(data);
-                auto vectSpace = dynamic_cast<const VectorSpaceSimpleStorage<float>*>(idx->space.get());
-                if (!vectSpace) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not vector space");
-                    return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                }
-                std::vector<float> tempVec(vec, vec + element_count);
-                Object* raw_obj = vectSpace->CreateObjFromVect(static_cast<IdType>(id), static_cast<LabelType>(-1), tempVec);
-                obj.reset(raw_obj);
-                break;
+    return dispatch_index_by_data_type(handle, [data, element_count, id](auto* idx) -> nmslib_error_t {
+        try {
+            auto obj = create_object(idx->space.get(), idx->data_type, data, element_count, idx->data_type == NMSLIB_DATATYPE_SPARSE_VECTOR ? element_count : 0, id);
+            if (!obj) {
+                SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create object");
+                return NMSLIB_ERROR_RUNTIME;
             }
-            case NMSLIB_DATATYPE_SPARSE_VECTOR: {
-                const nmslib_sparse_elem_float_t* elems = static_cast<const nmslib_sparse_elem_float_t*>(data);
-                if (nmslib_error_t err = NMSLIBUtil::validate_sparse_elements(elems, element_count, true)) {
-                    return err;
-                }
-                std::vector<SparseVectElem<float>> tempVec(element_count);
-                for (size_t j = 0; j < element_count; ++j) {
-                    tempVec[j].id_ = elems[j].id;
-                    tempVec[j].val_ = elems[j].value;
-                }
-                auto sparseSpace = dynamic_cast<const SpaceSparseVectorSimpleStorage<float>*>(idx->space.get());
-                if (!sparseSpace) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not sparse space");
-                    return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                }
-                Object* raw_obj = sparseSpace->CreateObjFromVect(static_cast<IdType>(id), static_cast<LabelType>(-1), tempVec);
-                obj.reset(raw_obj);
-                break;
-            }
-            case NMSLIB_DATATYPE_DENSE_UINT8_VECTOR: {
-                const uint8_t* u8data = static_cast<const uint8_t*>(data);
-                auto siftSpace = dynamic_cast<const SpaceL2SqrSift*>(idx->space.get());
-                if (!siftSpace) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not SIFT uint8 space");
-                    return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                }
-                std::vector<uint8_t> u8vec(u8data, u8data + element_count);  // Copy raw bytes
-                Object* raw_obj = siftSpace->CreateObjFromUint8Vect(
-                    static_cast<IdType>(id),
-                    static_cast<LabelType>(-1),
-                    u8vec
-                );
-                obj.reset(raw_obj);
-                break;
-            }
-            case NMSLIB_DATATYPE_OBJECT_AS_STRING: {
-                const char* str = static_cast<const char*>(data);
-                Object* raw_obj = new BorrowedObject(static_cast<IdType>(id), str, element_count);
-                obj.reset(raw_obj);
-                break;
-            }
-            default:
-                SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid data type");
-                return NMSLIB_ERROR_INVALID_ARGUMENT;
-        }
-        if (!obj) {
-            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create object");
+            idx->data.push_back(obj.release());
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Data point added successfully");
+            return NMSLIB_SUCCESS;
+        } catch (const std::bad_alloc& e) {
+            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Memory allocation failed: " + std::string(e.what()));
+            return NMSLIB_ERROR_OUT_OF_MEMORY;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to add data point");
             return NMSLIB_ERROR_RUNTIME;
         }
-        idx->data.push_back(obj.release());
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Data point added successfully");
-        return NMSLIB_SUCCESS;
-    } catch (const std::bad_alloc& e) {
-        SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Memory allocation failed: " + std::string(e.what()));
-        return NMSLIB_ERROR_OUT_OF_MEMORY;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to add data point");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 
@@ -665,86 +675,41 @@ nmslib_error_t nmslib_add_data_point_batch(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid batch inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        for (size_t i = 0; i < count; ++i) {
-            int32_t curr_id_int = ids ? ids[i] : static_cast<int32_t>(i);
-            IdType curr_id = static_cast<IdType>(curr_id_int);
-            std::unique_ptr<Object> obj;
-            size_t curr_num_elements = (num_elements && idx->data_type == NMSLIB_DATATYPE_SPARSE_VECTOR) ? num_elements[i] : element_count;
-            const void* curr_data = static_cast<const uint8_t*>(data) + i * (element_count * sizeof(float));  // Adjust for type
-            switch (idx->data_type) {
-                case NMSLIB_DATATYPE_DENSE_VECTOR: {
-                    const float* vec_start = static_cast<const float*>(data) + i * element_count;
-                    std::vector<float> tempVec(vec_start, vec_start + element_count);
-                    auto vectSpace = dynamic_cast<const VectorSpaceSimpleStorage<float>*>(idx->space.get());
-                    if (!vectSpace) {
-                        SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not vector space");
-                        return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                    }
-                    Object* raw_obj = vectSpace->CreateObjFromVect(curr_id, static_cast<LabelType>(-1), tempVec);
-                    obj.reset(raw_obj);
-                    break;
+    return dispatch_index_by_data_type(index, [data, count, element_count, ids, num_elements](auto* idx) -> nmslib_error_t {
+        try {
+            size_t offset = 0;
+            for (size_t i = 0; i < count; ++i) {
+                int32_t curr_id_int = ids ? ids[i] : static_cast<int32_t>(i);
+                size_t curr_num_elements = (num_elements && idx->data_type == NMSLIB_DATATYPE_SPARSE_VECTOR) ? num_elements[i] : element_count;
+                size_t stride;
+                size_t effective_dim = element_count;
+                if (idx->data_type == NMSLIB_DATATYPE_SPARSE_VECTOR) {
+                    stride = curr_num_elements * sizeof(nmslib_sparse_elem_float_t);
+                    effective_dim = 0;
+                } else if (idx->data_type == NMSLIB_DATATYPE_DENSE_UINT8_VECTOR) {
+                    stride = element_count * sizeof(uint8_t);
+                } else {
+                    stride = element_count * sizeof(float);
                 }
-                case NMSLIB_DATATYPE_SPARSE_VECTOR: {
-                    const nmslib_sparse_elem_float_t* elems_start = static_cast<const nmslib_sparse_elem_float_t*>(data) + i * curr_num_elements;
-                    if (nmslib_error_t err = NMSLIBUtil::validate_sparse_elements(elems_start, curr_num_elements, true)) {
-                        return err;
-                    }
-                    std::vector<SparseVectElem<float>> tempVec(curr_num_elements);
-                    for (size_t j = 0; j < curr_num_elements; ++j) {
-                        tempVec[j].id_ = elems_start[j].id;
-                        tempVec[j].val_ = elems_start[j].value;
-                    }
-                    auto sparseSpace = dynamic_cast<const SpaceSparseVectorSimpleStorage<float>*>(idx->space.get());
-                    if (!sparseSpace) {
-                        SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not sparse space");
-                        return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                    }
-                    Object* raw_obj = sparseSpace->CreateObjFromVect(curr_id, static_cast<LabelType>(-1), tempVec);
-                    obj.reset(raw_obj);
-                    break;
+                const void* curr_data = static_cast<const char*>(data) + offset;
+                auto obj = create_object(idx->space.get(), idx->data_type, curr_data, effective_dim, curr_num_elements, curr_id_int);
+                if (!obj) {
+                    SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create batch object");
+                    return NMSLIB_ERROR_RUNTIME;
                 }
-                case NMSLIB_DATATYPE_DENSE_UINT8_VECTOR: {
-                    const uint8_t* u8_start = static_cast<const uint8_t*>(data) + i * element_count;
-                    auto siftSpace = dynamic_cast<const SpaceL2SqrSift*>(idx->space.get());
-                    if (!siftSpace) {
-                        SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not SIFT uint8 space");
-                        return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                    }
-                    std::vector<uint8_t> u8vec(u8_start, u8_start + element_count);  // Copy slice
-                    Object* raw_obj = siftSpace->CreateObjFromUint8Vect(
-                        curr_id,
-                        static_cast<LabelType>(-1),
-                        u8vec
-                    );
-                    obj.reset(raw_obj);
-                    break;
-                }
-                case NMSLIB_DATATYPE_OBJECT_AS_STRING: {
-                    // Assume flat char** or handled separately
-                    SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Use batch_string for strings");
-                    return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                }
-                default:
-                    SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid data type for batch");
-                    return NMSLIB_ERROR_INVALID_ARGUMENT;
+                idx->data.push_back(obj.release());
+                offset += stride;
             }
-            if (!obj) {
-                SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create batch object");
-                return NMSLIB_ERROR_RUNTIME;
-            }
-            idx->data.push_back(obj.release());
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Batch added successfully");
+            return NMSLIB_SUCCESS;
+        } catch (const std::bad_alloc& e) {
+            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Batch alloc failed: " + std::string(e.what()));
+            return NMSLIB_ERROR_OUT_OF_MEMORY;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to add batch");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Batch added successfully");
-        return NMSLIB_SUCCESS;
-    } catch (const std::bad_alloc& e) {
-        SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Batch alloc failed: " + std::string(e.what()));
-        return NMSLIB_ERROR_OUT_OF_MEMORY;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to add batch");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 nmslib_error_t nmslib_add_data_point_batch_uint8(
@@ -758,40 +723,38 @@ nmslib_error_t nmslib_add_data_point_batch_uint8(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid uint8 batch inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        if (idx->data_type != NMSLIB_DATATYPE_DENSE_UINT8_VECTOR) {
-            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not uint8 vector space");
-            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-        }
-        auto siftSpace = dynamic_cast<const SpaceL2SqrSift*>(idx->space.get());
-        if (!siftSpace) {
-            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not SIFT space");
-            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-        }
-        const uint8_t* u8data = data;
-        for (size_t i = 0; i < count; ++i) {
-            int32_t curr_id_int = ids ? ids[i] : static_cast<int32_t>(i);
-            IdType curr_id = static_cast<IdType>(curr_id_int);
-            const uint8_t* vec_start = u8data + i * element_count;
-            std::vector<uint8_t> tempVec(vec_start, vec_start + element_count);
-            // Use CreateObjFromUint8Vect instead of CreateObjFromVect
-            Object* raw_obj = siftSpace->CreateObjFromUint8Vect(curr_id, static_cast<LabelType>(-1), tempVec);
-            if (!raw_obj) {
-                SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to create uint8 object");
-                return NMSLIB_ERROR_OUT_OF_MEMORY;
+    return dispatch_index_by_data_type(handle, [data, count, element_count, ids](auto* idx) -> nmslib_error_t {
+        try {
+            if (idx->data_type != NMSLIB_DATATYPE_DENSE_UINT8_VECTOR) {
+                SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not uint8 vector space");
+                return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
             }
-            idx->data.push_back(raw_obj);
+            auto siftSpace = dynamic_cast<const SpaceL2SqrSift*>(idx->space.get());
+            if (!siftSpace) {
+                SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not SIFT space");
+                return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+            }
+            for (size_t i = 0; i < count; ++i) {
+                int32_t curr_id_int = ids ? ids[i] : static_cast<int32_t>(i);
+                const uint8_t* vec_start = data + i * element_count;
+                std::vector<uint8_t> tempVec(vec_start, vec_start + element_count);
+                Object* raw_obj = siftSpace->CreateObjFromUint8Vect(static_cast<IdType>(curr_id_int), static_cast<LabelType>(-1), tempVec);
+                if (!raw_obj) {
+                    SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to create uint8 object");
+                    return NMSLIB_ERROR_OUT_OF_MEMORY;
+                }
+                idx->data.push_back(raw_obj);
+            }
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "UInt8 batch added successfully");
+            return NMSLIB_SUCCESS;
+        } catch (const std::bad_alloc& e) {
+            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Memory allocation failed: " + std::string(e.what()));
+            return NMSLIB_ERROR_OUT_OF_MEMORY;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to add uint8 batch");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "UInt8 batch added successfully");
-        return NMSLIB_SUCCESS;
-    } catch (const std::bad_alloc& e) {
-        SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Memory allocation failed: " + std::string(e.what()));
-        return NMSLIB_ERROR_OUT_OF_MEMORY;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to add uint8 batch");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 nmslib_error_t nmslib_add_data_point_batch_string(
@@ -807,30 +770,32 @@ nmslib_error_t nmslib_add_data_point_batch_string(
 
     auto hdr = reinterpret_cast<nmslib_index_header_t*>(index);
     if (hdr->data_type != NMSLIB_DATATYPE_OBJECT_AS_STRING) {
-        // If header says not object-as-string, return incompatible
         SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not string space");
         return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
     }
 
-    // Cast to int-instantiated index (string objects are under int registry in this codebase)
-    auto idx = reinterpret_cast<nmslib_internal_index_t<int>*>(index);
-
-    for (size_t i = 0; i < count; ++i) {
-        if (!data[i]) {
-            SET_LAST_ERROR(NMSLIB_ERROR_NULL_POINTER, "Null string in batch");
-            return NMSLIB_ERROR_NULL_POINTER;
-        }
-        std::string str(data[i]);
-        std::unique_ptr<Object> obj(idx->space->CreateObjFromStr(ids ? ids[i] : static_cast<int32_t>(i), -1, str, 0));
-        if (!obj) {
-            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create string object");
+    return dispatch_index_by_data_type(index, [data, count, ids](auto* idx) -> nmslib_error_t {
+        try {
+            for (size_t i = 0; i < count; ++i) {
+                if (!data[i]) {
+                    SET_LAST_ERROR(NMSLIB_ERROR_NULL_POINTER, "Null string in batch");
+                    return NMSLIB_ERROR_NULL_POINTER;
+                }
+                std::string str(data[i]);
+                std::unique_ptr<Object> obj(idx->space->CreateObjFromStr(ids ? ids[i] : static_cast<int32_t>(i), -1, str, nullptr));
+                if (!obj) {
+                    SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create string object");
+                    return NMSLIB_ERROR_RUNTIME;
+                }
+                idx->data.push_back(obj.release());
+            }
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "String batch added successfully");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to add string batch");
             return NMSLIB_ERROR_RUNTIME;
         }
-        idx->data.push_back(obj.release());
-    }
-
-    SET_LAST_ERROR(NMSLIB_SUCCESS, "String batch added successfully");
-    return NMSLIB_SUCCESS;
+    });
 }
 
 
@@ -847,13 +812,7 @@ nmslib_error_t nmslib_knn_query_get_size(
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
     try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        if (!idx->index_ptr) {
-            SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built");
-            return NMSLIB_ERROR_INDEX_BUILD_FAILED;
-        }
-        // Use NMSLIB's KNNQuery to get size (simplified; in practice, use SearchParams)
-        *out_size = k + 10;  // Heuristic buffer
+        *out_size = k;
         SET_LAST_ERROR(NMSLIB_SUCCESS, "KNN size retrieved");
         return NMSLIB_SUCCESS;
     } catch (...) {
@@ -862,14 +821,6 @@ nmslib_error_t nmslib_knn_query_get_size(
     }
 }
 
-// ============================================================================
-//  Fixed version of nmslib_knn_query_fill
-//  Safe template dispatch using nmslib_index_header_t
-// ============================================================================
-
-// ============================================================================
-// Replacement: nmslib_knn_query_fill
-// ============================================================================
 nmslib_error_t nmslib_knn_query_fill(
     nmslib_index_handle_t index,
     const void* query,
@@ -878,7 +829,6 @@ nmslib_error_t nmslib_knn_query_fill(
     nmslib_result_t* result,
     size_t num_elements
 ) {
-    // validate inputs (existing helper in repo)
     if (nmslib_error_t err = NMSLIBUtil::validate_common_inputs(index, query, query_size_or_elem_count, result)) {
         SET_LAST_ERROR(err, "Invalid KNN query inputs");
         return err;
@@ -888,275 +838,37 @@ nmslib_error_t nmslib_knn_query_fill(
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
 
-    if (!index) {
-        SET_LAST_ERROR(NMSLIB_ERROR_NULL_POINTER, "Null index handle");
-        return NMSLIB_ERROR_NULL_POINTER;
-    }
+    return dispatch_index_by_data_type(index, [query, query_size_or_elem_count, k, result, num_elements](auto* idx) -> nmslib_error_t {
+        using dist_t = decltype(idx->space->IndexTimeDistance(static_cast<const Object*>(nullptr), static_cast<const Object*>(nullptr)));
+        if (!idx->index_ptr) {
+            SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built");
+            return NMSLIB_ERROR_INDEX_BUILD_FAILED;
+        }
 
-    // Read header (must exist as first field of internal index structs)
-    auto hdr = reinterpret_cast<nmslib_index_header_t*>(index);
-
-    try {
-        // Dispatch by the canonical header data_type
-        switch (hdr->data_type) {
-
-            // ---------------------------
-            // FLOAT-index branch (existing implementation)
-            // ---------------------------
-            case NMSLIB_DATATYPE_DENSE_VECTOR:
-            case NMSLIB_DATATYPE_SPARSE_VECTOR: {
-                auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-                if (!idx->index_ptr) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built (float index)");
-                    return NMSLIB_ERROR_INDEX_BUILD_FAILED;
-                }
-
-                std::unique_ptr<Object> qobj;
-                // Build query object depending on dense vs sparse
-                if (hdr->data_type == NMSLIB_DATATYPE_DENSE_VECTOR) {
-                    const float* vec = static_cast<const float*>(query);
-                    std::vector<float> tempVec(vec, vec + query_size_or_elem_count);
-                    auto vectSpace = dynamic_cast<const VectorSpaceSimpleStorage<float>*>(idx->space.get());
-                    if (vectSpace)
-                        qobj.reset(vectSpace->CreateObjFromVect(0, static_cast<LabelType>(-1), tempVec));
-                } else { // sparse
-                    const nmslib_sparse_elem_float_t* elems = static_cast<const nmslib_sparse_elem_float_t*>(query);
-                    if (nmslib_error_t err = NMSLIBUtil::validate_sparse_elements(elems, num_elements, true))
-                        return err;
-                    std::vector<SparseVectElem<float>> tempVec(num_elements);
-                    for (size_t j = 0; j < num_elements; ++j) {
-                        tempVec[j].id_ = elems[j].id;
-                        tempVec[j].val_ = elems[j].value;
-                    }
-                    auto sparseSpace = dynamic_cast<const SpaceSparseVectorSimpleStorage<float>*>(idx->space.get());
-                    if (sparseSpace)
-                        qobj.reset(sparseSpace->CreateObjFromVect(0, static_cast<LabelType>(-1), tempVec));
-                }
-
-                if (!qobj) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Failed to create query object");
-                    result->size = 0;
-                    return NMSLIB_ERROR_INVALID_ARGUMENT;
-                }
-
-                // Run the search (use same params as repo)
-                similarity::KNNQuery<float> knnQuery(*(idx->space), qobj.get(), k);
-                AnyParams queryParams({ "efSearch=200" });
-                idx->index_ptr->SetQueryTimeParams(queryParams);
-                idx->index_ptr->Search(&knnQuery);
-
-                auto res = knnQuery.Result();
-                if (!res) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_QUERY_EXECUTION_FAILED, "Query result missing");
-                    result->size = 0;
-                    return NMSLIB_ERROR_QUERY_EXECUTION_FAILED;
-                }
-
-                size_t found = res->Size();
-                result->size = found;
-
-                // Allow success even when zero neighbors found
-                if (found == 0) {
-                    SET_LAST_ERROR(NMSLIB_SUCCESS, "No neighbors found");
-                    return NMSLIB_SUCCESS;
-                }
-
-                if (found > result->capacity) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_BUFFER_TOO_SMALL, "Result buffers too small for " + std::to_string(found));
-                    return NMSLIB_ERROR_BUFFER_TOO_SMALL;
-                }
-
-                auto cloneQueue = res->Clone();
-                std::vector<std::pair<int32_t, float>> tmp;
-                tmp.reserve(found);
-                while (!cloneQueue->Empty()) {
-                    float d = cloneQueue->TopDistance();
-                    const Object* o = cloneQueue->TopObject();
-                    tmp.emplace_back(static_cast<int32_t>(o->id()), d);
-                    cloneQueue->Pop();
-                }
-                delete cloneQueue;
-                std::reverse(tmp.begin(), tmp.end());
-
-                for (size_t i = 0; i < found; ++i) {
-                    result->ids[i] = tmp[i].first;
-                    result->distances[i] = tmp[i].second;
-                }
-
-                SET_LAST_ERROR(NMSLIB_SUCCESS, "KNN query filled successfully");
-                return NMSLIB_SUCCESS;
+        try {
+            size_t effective_num_elements = (idx->data_type == NMSLIB_DATATYPE_SPARSE_VECTOR) ? num_elements : 0;
+            auto qobj = create_object(idx->space.get(), idx->data_type, query, query_size_or_elem_count, effective_num_elements, 0);
+            if (!qobj) {
+                SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Failed to create query object");
+                result->size = 0;
+                return NMSLIB_ERROR_INVALID_ARGUMENT;
             }
 
-            // ---------------------------
-            // UINT8 / SIFT branch (int-instantiated index)
-            // ---------------------------
-            case NMSLIB_DATATYPE_DENSE_UINT8_VECTOR: {
-                auto idx = reinterpret_cast<nmslib_internal_index_t<int>*>(index);
-                if (!idx->index_ptr) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built (uint8 index)");
-                    return NMSLIB_ERROR_INDEX_BUILD_FAILED;
-                }
-
-                // Build uint8 query object using the SIFT helper
-                const uint8_t* u8data = static_cast<const uint8_t*>(query);
-                if (!u8data) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Null uint8 query");
-                    return NMSLIB_ERROR_INVALID_ARGUMENT;
-                }
-                std::vector<uint8_t> qv(u8data, u8data + query_size_or_elem_count);
-
-                auto siftSpace = dynamic_cast<const SpaceL2SqrSift*>(idx->space.get());
-                if (!siftSpace) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not L2SqrSIFT space");
-                    return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                }
-
-                // CreateObjFromUint8Vect returns an Object* in this codebase — use unique_ptr for RAII
-                std::unique_ptr<Object> qobj;
-                Object* raw = siftSpace->CreateObjFromUint8Vect(static_cast<IdType>(0), static_cast<LabelType>(-1), qv);
-                if (!raw) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create uint8 query object");
-                    return NMSLIB_ERROR_RUNTIME;
-                }
-                qobj.reset(raw);
-
-                // Run search using the int-index types
-                similarity::KNNQuery<int> knnQuery(*(idx->space), qobj.get(), k);
-                AnyParams queryParams({ "efSearch=200" });
-                idx->index_ptr->SetQueryTimeParams(queryParams);
-                idx->index_ptr->Search(&knnQuery);
-
-                auto res = knnQuery.Result();
-                if (!res) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_QUERY_EXECUTION_FAILED, "Query result missing (uint8)");
-                    result->size = 0;
-                    return NMSLIB_ERROR_QUERY_EXECUTION_FAILED;
-                }
-
-                size_t found = res->Size();
-                result->size = found;
-
-                if (found == 0) {
-                    SET_LAST_ERROR(NMSLIB_SUCCESS, "No neighbors found");
-                    return NMSLIB_SUCCESS;
-                }
-
-                if (found > result->capacity) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_BUFFER_TOO_SMALL, "Result buffers too small for " + std::to_string(found));
-                    return NMSLIB_ERROR_BUFFER_TOO_SMALL;
-                }
-
-                auto cloneQueue = res->Clone();
-                std::vector<std::pair<int32_t, float>> tmp;
-                tmp.reserve(found);
-                while (!cloneQueue->Empty()) {
-                    // TopDistance for int-based queue might be integral; cast to float for C API
-                    float d = static_cast<float>(cloneQueue->TopDistance());
-                    const Object* o = cloneQueue->TopObject();
-                    tmp.emplace_back(static_cast<int32_t>(o->id()), d);
-                    cloneQueue->Pop();
-                }
-                delete cloneQueue;
-                std::reverse(tmp.begin(), tmp.end());
-
-                for (size_t i = 0; i < found; ++i) {
-                    result->ids[i] = tmp[i].first;
-                    result->distances[i] = tmp[i].second;
-                }
-
-                SET_LAST_ERROR(NMSLIB_SUCCESS, "KNN query filled successfully (uint8)");
-                return NMSLIB_SUCCESS;
-            }
-
-            // ---------------------------
-            // STRING / levenshtein branch (object-as-string, int-index)
-            // ---------------------------
-            case NMSLIB_DATATYPE_OBJECT_AS_STRING: {
-                auto idx = reinterpret_cast<nmslib_internal_index_t<int>*>(index);
-                if (!idx->index_ptr) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built (string index)");
-                    return NMSLIB_ERROR_INDEX_BUILD_FAILED;
-                }
-
-                const char* str = static_cast<const char*>(query);
-                if (!str) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Null string query");
-                    return NMSLIB_ERROR_INVALID_ARGUMENT;
-                }
-
-                // Create string object using the space's CreateObjFromStr (returns unique_ptr<Object>)
-                std::unique_ptr<Object> qobj(idx->space->CreateObjFromStr(static_cast<IdType>(0), static_cast<LabelType>(-1), std::string(str), nullptr));
-                if (!qobj) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create string query object");
-                    return NMSLIB_ERROR_RUNTIME;
-                }
-
-                similarity::KNNQuery<int> knnQuery(*(idx->space), qobj.get(), k);
-                AnyParams queryParams({ "efSearch=200" });
-                idx->index_ptr->SetQueryTimeParams(queryParams);
-                idx->index_ptr->Search(&knnQuery);
-
-                auto res = knnQuery.Result();
-                if (!res) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_QUERY_EXECUTION_FAILED, "Query result missing (string)");
-                    result->size = 0;
-                    return NMSLIB_ERROR_QUERY_EXECUTION_FAILED;
-                }
-
-                size_t found = res->Size();
-                result->size = found;
-
-                if (found == 0) {
-                    SET_LAST_ERROR(NMSLIB_SUCCESS, "No neighbors found");
-                    return NMSLIB_SUCCESS;
-                }
-
-                if (found > result->capacity) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_BUFFER_TOO_SMALL, "Result buffers too small for " + std::to_string(found));
-                    return NMSLIB_ERROR_BUFFER_TOO_SMALL;
-                }
-
-                auto cloneQueue = res->Clone();
-                std::vector<std::pair<int32_t, float>> tmp;
-                tmp.reserve(found);
-                while (!cloneQueue->Empty()) {
-                    float d = static_cast<float>(cloneQueue->TopDistance());
-                    const Object* o = cloneQueue->TopObject();
-                    tmp.emplace_back(static_cast<int32_t>(o->id()), d);
-                    cloneQueue->Pop();
-                }
-                delete cloneQueue;
-                std::reverse(tmp.begin(), tmp.end());
-
-                for (size_t i = 0; i < found; ++i) {
-                    result->ids[i] = tmp[i].first;
-                    result->distances[i] = tmp[i].second;
-                }
-
-                SET_LAST_ERROR(NMSLIB_SUCCESS, "KNN query filled successfully (string)");
-                return NMSLIB_SUCCESS;
-            }
-
-            // ---------------------------
-            // Unsupported data_type
-            // ---------------------------
-            default:
-                SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Unsupported data type for knn query");
-                return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-        } // switch
-
-    } catch (const std::bad_alloc& e) {
-        SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Query alloc failed: " + std::string(e.what()));
-        return NMSLIB_ERROR_OUT_OF_MEMORY;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_QUERY_EXECUTION_FAILED, "KNN query failed");
-        return NMSLIB_ERROR_QUERY_EXECUTION_FAILED;
-    }
+            similarity::KNNQuery<dist_t> knnQuery(*idx->space, qobj.get(), k);
+            idx->index_ptr->SetQueryTimeParams(defaultQueryParams);
+            idx->index_ptr->Search(&knnQuery);
+            extract_knn_results(knnQuery.Result(), result);
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "KNN query filled successfully");
+            return NMSLIB_SUCCESS;
+        } catch (const std::bad_alloc& e) {
+            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Query alloc failed: " + std::string(e.what()));
+            return NMSLIB_ERROR_OUT_OF_MEMORY;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_QUERY_EXECUTION_FAILED, "KNN query failed");
+            return NMSLIB_ERROR_QUERY_EXECUTION_FAILED;
+        }
+    });
 }
-
-
-
-
 
 nmslib_error_t nmslib_knn_query_batch(
     nmslib_index_handle_t index,
@@ -1173,12 +885,6 @@ nmslib_error_t nmslib_knn_query_batch(
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
     try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        if (!idx->index_ptr) {
-            SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built");
-            return NMSLIB_ERROR_INDEX_BUILD_FAILED;
-        }
-        // Parallel batch search (simplified)
         for (size_t i = 0; i < query_count; ++i) {
             nmslib_error_t err = nmslib_knn_query_fill(index, static_cast<const char*>(queries) + i * query_size_or_elem_count * sizeof(float), query_size_or_elem_count, k, &results[i], num_elements ? num_elements[i] : 0);
             if (err != NMSLIB_SUCCESS) return err;
@@ -1204,11 +910,6 @@ nmslib_error_t nmslib_range_query_get_size(
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
     try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        if (!idx->index_ptr) {
-            SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built");
-            return NMSLIB_ERROR_INDEX_BUILD_FAILED;
-        }
         *out_size = 100;  // Heuristic
         SET_LAST_ERROR(NMSLIB_SUCCESS, "Range size retrieved");
         return NMSLIB_SUCCESS;
@@ -1231,12 +932,6 @@ nmslib_error_t nmslib_range_query_fill(
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
     try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        if (!idx->index_ptr) {
-            SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built");
-            return NMSLIB_ERROR_INDEX_BUILD_FAILED;
-        }
-        // Simplified range search
         result->size = 0;  // Placeholder
         SET_LAST_ERROR(NMSLIB_SUCCESS, "Range query filled");
         return NMSLIB_SUCCESS;
@@ -1246,7 +941,6 @@ nmslib_error_t nmslib_range_query_fill(
     }
 }
 
-// Updated nmslib_get_distance (use IndexTimeDistance(obj1, obj2))
 nmslib_error_t nmslib_get_distance(
     nmslib_index_handle_t index,
     size_t pos1,
@@ -1257,15 +951,16 @@ nmslib_error_t nmslib_get_distance(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid distance inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        *distance = idx->space->IndexTimeDistance(idx->data[pos1], idx->data[pos2]);
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Distance computed successfully");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to compute distance");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    return dispatch_index_by_data_type(index, [pos1, pos2, distance](auto* idx) -> nmslib_error_t {
+        try {
+            *distance = idx->space->IndexTimeDistance(idx->data[pos1], idx->data[pos2]);
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Distance computed successfully");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to compute distance");
+            return NMSLIB_ERROR_RUNTIME;
+        }
+    });
 }
 
 nmslib_error_t nmslib_get_data_point_size(
@@ -1277,15 +972,16 @@ nmslib_error_t nmslib_get_data_point_size(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid data point size inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        *size = idx->data[position]->datalength();
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Data point size retrieved");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to get data point size");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    return dispatch_index_by_data_type(index, [position, size](auto* idx) -> nmslib_error_t {
+        try {
+            *size = idx->data[position]->datalength();
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Data point size retrieved");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to get data point size");
+            return NMSLIB_ERROR_RUNTIME;
+        }
+    });
 }
 
 nmslib_error_t nmslib_get_data_point_fill(
@@ -1298,21 +994,22 @@ nmslib_error_t nmslib_get_data_point_fill(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid data point fill inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        const void* src = idx->data[position]->data();
-        size_t src_size = idx->data[position]->datalength();
-        if (size < src_size) {
-            SET_LAST_ERROR(NMSLIB_ERROR_BUFFER_TOO_SMALL, "Buffer too small for data point");
-            return NMSLIB_ERROR_BUFFER_TOO_SMALL;
+    return dispatch_index_by_data_type(index, [position, data, size](auto* idx) -> nmslib_error_t {
+        try {
+            const void* src = idx->data[position]->data();
+            size_t src_size = idx->data[position]->datalength();
+            if (size < src_size) {
+                SET_LAST_ERROR(NMSLIB_ERROR_BUFFER_TOO_SMALL, "Buffer too small for data point");
+                return NMSLIB_ERROR_BUFFER_TOO_SMALL;
+            }
+            std::memcpy(data, src, src_size);
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Data point filled");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to fill data point");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        std::memcpy(data, src, src_size);
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Data point filled");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to fill data point");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 nmslib_error_t nmslib_get_data_point_string(
@@ -1326,25 +1023,26 @@ nmslib_error_t nmslib_get_data_point_string(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid string data point inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        if (idx->data_type != NMSLIB_DATATYPE_OBJECT_AS_STRING) {
-            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Invalid data type for string");
-            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+    return dispatch_index_by_data_type(index, [position, data, data_len, allocator](auto* idx) -> nmslib_error_t {
+        try {
+            if (idx->data_type != NMSLIB_DATATYPE_OBJECT_AS_STRING) {
+                SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Invalid data type for string");
+                return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+            }
+            const char* str = static_cast<const char*>(idx->data[position]->data());
+            *data_len = idx->data[position]->datalength() + 1;
+            *data = NMSLIBUtil::dup_string(std::string(str, *data_len - 1), allocator);
+            if (!*data) {
+                SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate string");
+                return NMSLIB_ERROR_OUT_OF_MEMORY;
+            }
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "String data point retrieved");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to get string data point");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        const char* str = static_cast<const char*>(idx->data[position]->data());
-        *data_len = idx->data[position]->datalength() + 1;
-        *data = NMSLIBUtil::dup_string(std::string(str, *data_len - 1), allocator);
-        if (!*data) {
-            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate string");
-            return NMSLIB_ERROR_OUT_OF_MEMORY;
-        }
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "String data point retrieved");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to get string data point");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 nmslib_error_t nmslib_borrow_data_dense(
@@ -1358,37 +1056,37 @@ nmslib_error_t nmslib_borrow_data_dense(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid dense borrow inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        if (idx->data_type != NMSLIB_DATATYPE_DENSE_VECTOR) {
-            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not dense vector");
-            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+    return dispatch_index_by_data_type(index, [position, data, size, free_fn](auto* idx) -> nmslib_error_t {
+        try {
+            if (idx->data_type != NMSLIB_DATATYPE_DENSE_VECTOR) {
+                SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not dense vector");
+                return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+            }
+            nmslib_borrowed_data_t* borrowed = static_cast<nmslib_borrowed_data_t*>(
+                idx->allocator.alloc(sizeof(nmslib_borrowed_data_t), idx->allocator.ctx));
+            if (!borrowed) {
+                SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate wrapper");
+                return NMSLIB_ERROR_OUT_OF_MEMORY;
+            }
+            *size = idx->data[position]->bufferlength();
+            void* tempData = idx->allocator.alloc(*size, idx->allocator.ctx);
+            if (!tempData) {
+                idx->allocator.free(borrowed, idx->allocator.ctx);
+                SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate data copy");
+                return NMSLIB_ERROR_OUT_OF_MEMORY;
+            }
+            std::memcpy(tempData, idx->data[position]->data(), *size);
+            borrowed->data = tempData;
+            borrowed->allocator = idx->allocator;
+            *data = tempData;
+            *free_fn = nmslib_borrowed_data_free;
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Dense data borrowed");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to borrow dense data");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        // Alloc wrapper
-        nmslib_borrowed_data_t* borrowed = static_cast<nmslib_borrowed_data_t*>(
-            idx->allocator.alloc(sizeof(nmslib_borrowed_data_t), idx->allocator.ctx));
-        if (!borrowed) {
-            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate wrapper");
-            return NMSLIB_ERROR_OUT_OF_MEMORY;
-        }
-        *size = idx->data[position]->bufferlength();
-        void* tempData = idx->allocator.alloc(*size, idx->allocator.ctx);
-        if (!tempData) {
-            idx->allocator.free(borrowed, idx->allocator.ctx);
-            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate data copy");
-            return NMSLIB_ERROR_OUT_OF_MEMORY;
-        }
-        std::memcpy(tempData, idx->data[position]->data(), *size);
-        borrowed->data = tempData;
-        borrowed->allocator = idx->allocator;
-        *data = tempData;
-        *free_fn = nmslib_borrowed_data_free;
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Dense data borrowed");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to borrow dense data");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 nmslib_error_t nmslib_borrow_data_sparse(
@@ -1402,37 +1100,37 @@ nmslib_error_t nmslib_borrow_data_sparse(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid sparse borrow inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(index);
-        if (idx->data_type != NMSLIB_DATATYPE_SPARSE_VECTOR) {
-            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not sparse vector");
-            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+    return dispatch_index_by_data_type(index, [position, data, size, free_fn](auto* idx) -> nmslib_error_t {
+        try {
+            if (idx->data_type != NMSLIB_DATATYPE_SPARSE_VECTOR) {
+                SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not sparse vector");
+                return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+            }
+            nmslib_borrowed_data_t* borrowed = static_cast<nmslib_borrowed_data_t*>(
+                idx->allocator.alloc(sizeof(nmslib_borrowed_data_t), idx->allocator.ctx));
+            if (!borrowed) {
+                SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate wrapper");
+                return NMSLIB_ERROR_OUT_OF_MEMORY;
+            }
+            *size = idx->data[position]->bufferlength() / sizeof(nmslib_sparse_elem_float_t);
+            void* tempData = idx->allocator.alloc(*size * sizeof(nmslib_sparse_elem_float_t), idx->allocator.ctx);
+            if (!tempData) {
+                idx->allocator.free(borrowed, idx->allocator.ctx);
+                SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate sparse copy");
+                return NMSLIB_ERROR_OUT_OF_MEMORY;
+            }
+            std::memcpy(tempData, idx->data[position]->data(), *size * sizeof(nmslib_sparse_elem_float_t));
+            borrowed->data = tempData;
+            borrowed->allocator = idx->allocator;
+            *data = tempData;
+            *free_fn = nmslib_borrowed_data_free;
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Sparse data borrowed");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to borrow sparse data");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        // Similar to dense, but for sparse elems
-        nmslib_borrowed_data_t* borrowed = static_cast<nmslib_borrowed_data_t*>(
-            idx->allocator.alloc(sizeof(nmslib_borrowed_data_t), idx->allocator.ctx));
-        if (!borrowed) {
-            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate wrapper");
-            return NMSLIB_ERROR_OUT_OF_MEMORY;
-        }
-        *size = idx->data[position]->bufferlength() / sizeof(nmslib_sparse_elem_float_t);
-        void* tempData = idx->allocator.alloc(*size * sizeof(nmslib_sparse_elem_float_t), idx->allocator.ctx);
-        if (!tempData) {
-            idx->allocator.free(borrowed, idx->allocator.ctx);
-            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate sparse copy");
-            return NMSLIB_ERROR_OUT_OF_MEMORY;
-        }
-        std::memcpy(tempData, idx->data[position]->data(), *size * sizeof(nmslib_sparse_elem_float_t));
-        borrowed->data = tempData;
-        borrowed->allocator = idx->allocator;
-        *data = tempData;
-        *free_fn = nmslib_borrowed_data_free;
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Sparse data borrowed");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to borrow sparse data");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 nmslib_error_t nmslib_save_index(
@@ -1444,23 +1142,24 @@ nmslib_error_t nmslib_save_index(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid save inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        if (!idx->index_ptr) {
-            SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Index not built");
-            return NMSLIB_ERROR_INVALID_ARGUMENT;
+    return dispatch_index_by_data_type(handle, [path, save_data](auto* idx) -> nmslib_error_t {
+        try {
+            if (!idx->index_ptr) {
+                SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Index not built");
+                return NMSLIB_ERROR_INVALID_ARGUMENT;
+            }
+            if (save_data) {
+                std::vector<std::string> dummy;
+                idx->space->WriteObjectVectorBinData(idx->data, dummy, std::string(path) + ".dat");
+            }
+            idx->index_ptr->SaveIndex(path);
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Index saved successfully");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_DATA_IO_FAILED, "Failed to save index");
+            return NMSLIB_ERROR_DATA_IO_FAILED;
         }
-        if (save_data) {
-            std::vector<std::string> dummy;
-            idx->space->WriteObjectVectorBinData(idx->data, dummy, std::string(path) + ".dat");
-        }
-        idx->index_ptr->SaveIndex(path);
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Index saved successfully");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_DATA_IO_FAILED, "Failed to save index");
-        return NMSLIB_ERROR_DATA_IO_FAILED;
-    }
+    });
 }
 
 nmslib_error_t nmslib_load_index(
@@ -1475,17 +1174,17 @@ nmslib_error_t nmslib_load_index(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid load inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    void* mem = allocator->alloc(sizeof(nmslib_internal_index_t<float>), allocator->ctx);
-    if (!mem) {
-        SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate index");
-        return NMSLIB_ERROR_OUT_OF_MEMORY;
-    }
     try {
+        void* mem;
         nmslib_index_handle_t result = nullptr;
         switch (dist_type) {
             case NMSLIB_DISTTYPE_FLOAT: {
-                auto idx = new (mem) nmslib_internal_index_t<float>("", "", data_type, dist_type, allocator);
-                // Create dummy space/method for load
+                mem = allocator->alloc(sizeof(nmslib_internal_index_t<float>), allocator->ctx);
+                if (!mem) {
+                    SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate index");
+                    return NMSLIB_ERROR_OUT_OF_MEMORY;
+                }
+                auto idx = new (mem) nmslib_internal_index_t<float>("hnsw", "l2", data_type, dist_type, allocator);
                 idx->space.reset(SpaceFactoryRegistry<float>::Instance().CreateSpace("l2", AnyParams()));
                 auto factory = MethodFactoryRegistry<float>::Instance();
                 bool print_progress = false;
@@ -1500,8 +1199,12 @@ nmslib_error_t nmslib_load_index(
                 break;
             }
             case NMSLIB_DISTTYPE_INT: {
-                // Similar for int
-                auto idx = new (mem) nmslib_internal_index_t<int>("", "", data_type, dist_type, allocator);
+                mem = allocator->alloc(sizeof(nmslib_internal_index_t<int>), allocator->ctx);
+                if (!mem) {
+                    SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY, "Failed to allocate index");
+                    return NMSLIB_ERROR_OUT_OF_MEMORY;
+                }
+                auto idx = new (mem) nmslib_internal_index_t<int>("hnsw", "l2", data_type, dist_type, allocator);
                 idx->space.reset(SpaceFactoryRegistry<int>::Instance().CreateSpace("l2", AnyParams()));
                 auto factory = MethodFactoryRegistry<int>::Instance();
                 bool print_progress = false;
@@ -1517,7 +1220,6 @@ nmslib_error_t nmslib_load_index(
             }
             default:
                 SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid dist type for load");
-                allocator->free(mem, allocator->ctx);
                 return NMSLIB_ERROR_INVALID_ARGUMENT;
         }
         SET_LAST_ERROR(NMSLIB_SUCCESS, "Index loaded successfully");
@@ -1525,7 +1227,6 @@ nmslib_error_t nmslib_load_index(
         return NMSLIB_SUCCESS;
     } catch (...) {
         SET_LAST_ERROR(NMSLIB_ERROR_DATA_IO_FAILED, "Failed to load index");
-        allocator->free(mem, allocator->ctx);
         return NMSLIB_ERROR_DATA_IO_FAILED;
     }
 }
@@ -1538,19 +1239,20 @@ nmslib_error_t nmslib_set_query_time_params(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid index");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        if (!idx->index_ptr) {
-            SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built");
-            return NMSLIB_ERROR_INDEX_BUILD_FAILED;
+    return dispatch_index_by_data_type(handle, [params](auto* idx) -> nmslib_error_t {
+        try {
+            if (!idx->index_ptr) {
+                SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built");
+                return NMSLIB_ERROR_INDEX_BUILD_FAILED;
+            }
+            idx->index_ptr->SetQueryTimeParams(load_params(reinterpret_cast<nmslib_params_wrapper_t*>(params)));
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Query time params set");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to set query time params");
+            return NMSLIB_ERROR_RUNTIME;
         }
-        idx->index_ptr->SetQueryTimeParams(load_params(reinterpret_cast<nmslib_params_wrapper_t*>(params)));
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Query time params set");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to set query time params");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    });
 }
 
 nmslib_error_t nmslib_set_thread_pool_size(
@@ -1561,15 +1263,16 @@ nmslib_error_t nmslib_set_thread_pool_size(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid thread pool size");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        idx->thread_pool_size = size;
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Thread pool size set");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to set thread pool size");
-        return NMSLIB_ERROR_RUNTIME;
-    }
+    return dispatch_index_by_data_type(handle, [size](auto* idx) -> nmslib_error_t {
+        try {
+            idx->thread_pool_size = size;
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Thread pool size set");
+            return NMSLIB_SUCCESS;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to set thread pool size");
+            return NMSLIB_ERROR_RUNTIME;
+        }
+    });
 }
 
 size_t nmslib_get_thread_pool_size(nmslib_index_handle_t handle) {
@@ -1577,7 +1280,9 @@ size_t nmslib_get_thread_pool_size(nmslib_index_handle_t handle) {
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid index");
         return std::thread::hardware_concurrency();
     }
-    return reinterpret_cast<nmslib_internal_index_t<float>*>(handle)->thread_pool_size;
+    return dispatch_index_by_data_type(handle, [](auto* idx) -> size_t {
+        return idx->thread_pool_size;
+    });
 }
 
 size_t nmslib_data_qty(nmslib_index_handle_t handle) {
@@ -1585,28 +1290,30 @@ size_t nmslib_data_qty(nmslib_index_handle_t handle) {
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid index");
         return 0;
     }
-    return reinterpret_cast<nmslib_internal_index_t<float>*>(handle)->data.size();
+    return dispatch_index_by_data_type(handle, [](auto* idx) -> size_t {
+        return idx->data.size();
+    });
 }
 
-// Updated nmslib_index_memory_usage (use GetElemQty for dim)
 size_t nmslib_index_memory_usage(nmslib_index_handle_t handle) {
     if (!handle) return 0;
-    try {
-        auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        if (!idx->index_ptr) return 0;
-        size_t total = 0;
-        for (auto obj : idx->data) {
-            total += obj->bufferlength();
+    return dispatch_index_by_data_type(handle, [](auto* idx) -> size_t {
+        try {
+            if (!idx->index_ptr) return 0;
+            size_t total = 0;
+            for (auto obj : idx->data) {
+                total += obj->bufferlength();
+            }
+            size_t dim = 0;
+            if (!idx->data.empty()) {
+                dim = idx->space->GetElemQty(idx->data[0]);
+            }
+            total += idx->data.size() * dim * sizeof(float);
+            return total;
+        } catch (...) {
+            return 0;
         }
-        size_t dim = 0;
-        if (!idx->data.empty()) {
-            dim = idx->space->GetElemQty(idx->data[0]);
-        }
-        total += idx->data.size() * (dim * sizeof(float) + 32);  // Heuristic
-        return total;
-    } catch (...) {
-        return 0;
-    }
+    });
 }
 
 nmslib_error_t nmslib_add_data_point_batch_pointers(
@@ -1622,153 +1329,70 @@ nmslib_error_t nmslib_add_data_point_batch_pointers(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid pointer batch inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
+    if (nmslib_error_t err = NMSLIBUtil::validate_pointer_batch(data_ptrs, count, element_count)) {
+        return err;
+    }
 
-    // Read header and dispatch by index instantiation type
-    auto hdr = reinterpret_cast<nmslib_index_header_t*>(handle);
-    switch (hdr->data_type) {
-        // FLOAT-based index instantiation
-        case NMSLIB_DATATYPE_DENSE_VECTOR:
-        case NMSLIB_DATATYPE_SPARSE_VECTOR: {
-            auto idx = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-
-            // existing code path for float-index: create objects and push into idx->data
+    return dispatch_index_by_data_type(handle, [data_mode, data_ptrs, count, element_count, ids, num_elements](auto* idx) -> nmslib_error_t {
+        try {
             for (size_t i = 0; i < count; ++i) {
                 const int32_t curr_id = ids ? ids[i] : static_cast<int32_t>(i);
                 std::unique_ptr<Object> obj;
-                switch (data_mode) {
-                    case NMSLIB_DATA_MODE_DENSE_FLOAT: {
-                        if (idx->data_type != NMSLIB_DATATYPE_DENSE_VECTOR) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not dense float space");
-                            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                        }
-                        const float* vec = static_cast<const float*>(data_ptrs[i]);
-                        std::vector<float> tempVec(vec, vec + element_count);
-                        auto vectSpace = dynamic_cast<const VectorSpaceSimpleStorage<float>*>(idx->space.get());
-                        if (!vectSpace) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not vector space");
-                            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                        }
-                        Object* raw_obj = vectSpace->CreateObjFromVect(curr_id, static_cast<LabelType>(-1), tempVec);
-                        obj.reset(raw_obj);
-                        break;
-                    }
-                    case NMSLIB_DATA_MODE_SPARSE: {
-                        if (idx->data_type != NMSLIB_DATATYPE_SPARSE_VECTOR) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not sparse space");
-                            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                        }
-                        size_t curr_num = num_elements ? num_elements[i] : 0;
-                        if (curr_num == 0) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "No elements for sparse");
-                            return NMSLIB_ERROR_INVALID_ARGUMENT;
-                        }
-                        const nmslib_sparse_elem_float_t* elems = static_cast<const nmslib_sparse_elem_float_t*>(data_ptrs[i]);
-                        if (nmslib_error_t err = NMSLIBUtil::validate_sparse_elements(elems, curr_num, true)) {
-                            return err;
-                        }
-                        std::vector<SparseVectElem<float>> tempVec(curr_num);
-                        for (size_t j = 0; j < curr_num; ++j) {
-                            tempVec[j].id_ = elems[j].id;
-                            tempVec[j].val_ = elems[j].value;
-                        }
-                        auto sparseSpace = dynamic_cast<const SpaceSparseVectorSimpleStorage<float>*>(idx->space.get());
-                        if (!sparseSpace) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not sparse space");
-                            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                        }
-                        Object* raw_obj = sparseSpace->CreateObjFromVect(curr_id, static_cast<LabelType>(-1), tempVec);
-                        obj.reset(raw_obj);
-                        break;
-                    }
-                    default:
-                        SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Unsupported data mode for float index");
+                size_t curr_num = (data_mode == NMSLIB_DATA_MODE_SPARSE && num_elements) ? num_elements[i] : element_count;
+                size_t effective_dim = element_count;
+                if (data_mode == NMSLIB_DATA_MODE_SPARSE) {
+                    effective_dim = 0;
+                    if (curr_num == 0) {
+                        SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "No elements for sparse");
                         return NMSLIB_ERROR_INVALID_ARGUMENT;
-                } // data_mode switch
-
+                    }
+                    if (idx->data_type != NMSLIB_DATATYPE_SPARSE_VECTOR) {
+                        SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not sparse space");
+                        return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+                    }
+                    const nmslib_sparse_elem_float_t* elems = static_cast<const nmslib_sparse_elem_float_t*>(data_ptrs[i]);
+                    if (nmslib_error_t err = NMSLIBUtil::validate_sparse_elements(elems, curr_num, true)) {
+                        return err;
+                    }
+                } else if (data_mode == NMSLIB_DATA_MODE_DENSE_FLOAT) {
+                    if (idx->data_type != NMSLIB_DATATYPE_DENSE_VECTOR) {
+                        SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not dense float space");
+                        return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+                    }
+                } else if (data_mode == NMSLIB_DATA_MODE_UINT8) {
+                    if (idx->data_type != NMSLIB_DATATYPE_DENSE_UINT8_VECTOR) {
+                        SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not uint8 space");
+                        return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+                    }
+                    const uint8_t* u8vec_ptr = static_cast<const uint8_t*>(data_ptrs[i]);
+                    std::vector<uint8_t> u8data(u8vec_ptr, u8vec_ptr + element_count);
+                    auto siftSpace = dynamic_cast<const SpaceL2SqrSift*>(idx->space.get());
+                    if (!siftSpace) {
+                        SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not SIFT uint8 space");
+                        return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+                    }
+                    Object* raw_obj = siftSpace->CreateObjFromUint8Vect(curr_id, static_cast<LabelType>(-1), u8data);
+                    obj.reset(raw_obj);
+                } else {
+                    SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Unsupported data mode");
+                    return NMSLIB_ERROR_INVALID_ARGUMENT;
+                }
+                if (!obj && data_mode != NMSLIB_DATA_MODE_UINT8) {
+                    obj = create_object(idx->space.get(), idx->data_type, data_ptrs[i], effective_dim, curr_num, curr_id);
+                }
                 if (!obj) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create object from data pointer (float index)");
+                    SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create object from data pointer");
                     return NMSLIB_ERROR_RUNTIME;
                 }
                 idx->data.push_back(obj.release());
-            } // for i
-            SET_LAST_ERROR(NMSLIB_SUCCESS, "Pointer batch added successfully (float index)");
+            }
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Pointer batch added successfully");
             return NMSLIB_SUCCESS;
-        } // end float index case
-
-        // INT-based index instantiation (SIFT / uint8 / string-object usage)
-        case NMSLIB_DATATYPE_DENSE_UINT8_VECTOR:
-        case NMSLIB_DATATYPE_OBJECT_AS_STRING: {
-            auto idx = reinterpret_cast<nmslib_internal_index_t<int>*>(handle);
-
-            for (size_t i = 0; i < count; ++i) {
-                const int32_t curr_id = ids ? ids[i] : static_cast<int32_t>(i);
-                std::unique_ptr<Object> obj;
-                switch (data_mode) {
-                    case NMSLIB_DATA_MODE_UINT8: {
-                        if (idx->data_type != NMSLIB_DATATYPE_DENSE_UINT8_VECTOR) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not uint8 space");
-                            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                        }
-                        const uint8_t* u8vec_ptr = static_cast<const uint8_t*>(data_ptrs[i]);
-                        size_t curr_elem_count = element_count;
-                        std::vector<uint8_t> u8data(u8vec_ptr, u8vec_ptr + curr_elem_count);
-                        auto siftSpace = dynamic_cast<const SpaceL2SqrSift*>(idx->space.get());
-                        if (!siftSpace) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not SIFT uint8 space");
-                            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                        }
-                        Object* raw_obj = siftSpace->CreateObjFromUint8Vect(curr_id, static_cast<LabelType>(-1), u8data);
-                        obj.reset(raw_obj);
-                        break;
-                    }
-                    case NMSLIB_DATA_MODE_SPARSE: {
-                        if (idx->data_type != NMSLIB_DATATYPE_SPARSE_VECTOR) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not sparse space (int index)");
-                            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                        }
-                        size_t curr_num = num_elements ? num_elements[i] : 0;
-                        if (curr_num == 0) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "No elements for sparse");
-                            return NMSLIB_ERROR_INVALID_ARGUMENT;
-                        }
-                        const nmslib_sparse_elem_float_t* elems = static_cast<const nmslib_sparse_elem_float_t*>(data_ptrs[i]);
-                        if (nmslib_error_t err = NMSLIBUtil::validate_sparse_elements(elems, curr_num, true)) {
-                            return err;
-                        }
-                        std::vector<SparseVectElem<float>> tempVec(curr_num);
-                        for (size_t j = 0; j < curr_num; ++j) {
-                            tempVec[j].id_ = elems[j].id;
-                            tempVec[j].val_ = elems[j].value;
-                        }
-                        auto sparseSpace = dynamic_cast<const SpaceSparseVectorSimpleStorage<float>*>(idx->space.get());
-                        if (!sparseSpace) {
-                            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "Not sparse space");
-                            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-                        }
-                        Object* raw_obj = sparseSpace->CreateObjFromVect(curr_id, static_cast<LabelType>(-1), tempVec);
-                        obj.reset(raw_obj);
-                        break;
-                    }
-                    default:
-                        SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Unsupported data mode for int index");
-                        return NMSLIB_ERROR_INVALID_ARGUMENT;
-                } // inner switch
-
-                if (!obj) {
-                    SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to create object from data pointer (int index)");
-                    return NMSLIB_ERROR_RUNTIME;
-                }
-                idx->data.push_back(obj.release());
-            } // for i
-
-            SET_LAST_ERROR(NMSLIB_SUCCESS, "Pointer batch added successfully (int index)");
-            return NMSLIB_SUCCESS;
-        } // end int index case
-
-        default:
-            SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE, "No compatible index type found for provided handle");
-            return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
-    } // switch hdr->data_type
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME, "Failed to add pointer batch");
+            return NMSLIB_ERROR_RUNTIME;
+        }
+    });
 }
 
 
@@ -1776,42 +1400,27 @@ void nmslib_free_result(nmslib_result_t* result, const nmslib_allocator_t* alloc
     if (!result || !allocator || !allocator->free) return;
     if (result->ids) allocator->free(result->ids, allocator->ctx);
     if (result->distances) allocator->free(result->distances, allocator->ctx);
-    // Zero out to prevent double-free
     result->ids = nullptr;
     result->distances = nullptr;
     result->size = 0;
     result->capacity = 0;
 }
+
 void nmslib_initialize_pool(nmslib_index_handle_t handle) {
     if (!handle) return;
 
     try {
-        // Try float instantiation wrapper
-        auto idxf = reinterpret_cast<nmslib_internal_index_t<float>*>(handle);
-        if (idxf && idxf->index_ptr) {
-            // index_ptr is std::unique_ptr<Index<float>>
-            similarity::Index<float>* base_ptr = idxf->index_ptr.get();
-            auto* hnsw_f = dynamic_cast<similarity::Hnsw<float>*>(base_ptr);
-            if (hnsw_f) {
-                similarity::AnyParams dummy;
-                hnsw_f->CreateIndex(dummy); // idempotent for our usage: ensures pool exists
-                return;
+        dispatch_index_by_data_type(handle, [](auto* idx) -> void {
+            using dist_t = decltype(idx->space->IndexTimeDistance(static_cast<const Object*>(nullptr), static_cast<const Object*>(nullptr)));
+            if (idx && idx->index_ptr) {
+                Index<dist_t>* base_ptr = idx->index_ptr.get();
+                auto* hnsw = dynamic_cast<Hnsw<dist_t>*>(base_ptr);
+                if (hnsw) {
+                    AnyParams dummy;
+                    hnsw->CreateIndex(dummy);
+                }
             }
-        }
-
-        // Try int instantiation wrapper
-        auto idxi = reinterpret_cast<nmslib_internal_index_t<int>*>(handle);
-        if (idxi && idxi->index_ptr) {
-            similarity::Index<int>* base_ptr = idxi->index_ptr.get();
-            auto* hnsw_i = dynamic_cast<similarity::Hnsw<int>*>(base_ptr);
-            if (hnsw_i) {
-                similarity::AnyParams dummy;
-                hnsw_i->CreateIndex(dummy);
-                return;
-            }
-        }
-
-        // If not HNSW or index_ptr is null, nothing to do
+        });
     } catch (const std::exception& e) {
         fprintf(stderr, "NMSLIB pool initialization failed: %s\n", e.what());
     } catch (...) {
