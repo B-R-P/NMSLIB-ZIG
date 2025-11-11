@@ -909,15 +909,13 @@ nmslib_error_t nmslib_range_query_get_size(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid range query inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        *out_size = 100;  // Heuristic
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Range size retrieved");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_QUERY_EXECUTION_FAILED, "Failed to get range size");
-        return NMSLIB_ERROR_QUERY_EXECUTION_FAILED;
-    }
+    // Return a modest estimate; range_query_fill will set the actual number in result->size.
+    *out_size = 128;
+    SET_LAST_ERROR(NMSLIB_SUCCESS, "Range query size estimated");
+    return NMSLIB_SUCCESS;
 }
+
+
 
 nmslib_error_t nmslib_range_query_fill(
     nmslib_index_handle_t index,
@@ -931,15 +929,91 @@ nmslib_error_t nmslib_range_query_fill(
         SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Invalid range fill inputs");
         return NMSLIB_ERROR_INVALID_ARGUMENT;
     }
-    try {
-        result->size = 0;  // Placeholder
-        SET_LAST_ERROR(NMSLIB_SUCCESS, "Range query filled");
-        return NMSLIB_SUCCESS;
-    } catch (...) {
-        SET_LAST_ERROR(NMSLIB_ERROR_QUERY_EXECUTION_FAILED, "Failed to fill range query");
-        return NMSLIB_ERROR_QUERY_EXECUTION_FAILED;
-    }
+
+    return dispatch_index_by_data_type(index, [query, query_size_or_elem_count, radius, result, num_elements](auto* idx) -> nmslib_error_t {
+        using dist_t = decltype(idx->space->IndexTimeDistance(
+            static_cast<const Object*>(nullptr),
+            static_cast<const Object*>(nullptr)));
+
+        if (!idx->index_ptr) {
+            SET_LAST_ERROR(NMSLIB_ERROR_INDEX_BUILD_FAILED, "Index not built");
+            return NMSLIB_ERROR_INDEX_BUILD_FAILED;
+        }
+
+        try {
+            // create query object for dense or sparse spaces
+            size_t effective_num_elements =
+                (idx->data_type == NMSLIB_DATATYPE_SPARSE_VECTOR) ? num_elements : 0;
+            auto qobj = create_object(idx->space.get(),
+                                      idx->data_type,
+                                      query,
+                                      query_size_or_elem_count,
+                                      effective_num_elements,
+                                      0);
+            if (!qobj) {
+                SET_LAST_ERROR(NMSLIB_ERROR_INVALID_ARGUMENT, "Failed to create query object");
+                result->size = 0;
+                return NMSLIB_ERROR_INVALID_ARGUMENT;
+            }
+
+            // perform range query
+            similarity::RangeQuery<dist_t> rangeQuery(
+                *idx->space, qobj.get(), static_cast<dist_t>(radius));
+
+            idx->index_ptr->SetQueryTimeParams(defaultQueryParams);
+            idx->index_ptr->Search(&rangeQuery);
+
+            const auto* res_ptr = rangeQuery.Result();
+            if (!res_ptr) {
+                result->size = 0;
+                SET_LAST_ERROR(NMSLIB_SUCCESS, "Range query returned zero results");
+                return NMSLIB_SUCCESS;
+            }
+
+            size_t n = std::min(res_ptr->size(), result->capacity);
+            size_t i = 0;
+            for (auto it = res_ptr->begin(); it != res_ptr->end() && i < n; ++it, ++i) {
+                const Object* obj = *it;
+                result->ids[i] = static_cast<int32_t>(obj->id());
+                result->distances[i] =
+                    idx->space->IndexTimeDistance(rangeQuery.QueryObject(), obj);
+            }
+            result->size = n;
+
+            SET_LAST_ERROR(NMSLIB_SUCCESS, "Range query filled successfully");
+            return NMSLIB_SUCCESS;
+
+        } catch (const std::bad_alloc& e) {
+            SET_LAST_ERROR(NMSLIB_ERROR_OUT_OF_MEMORY,
+                           std::string("Range query alloc failed: ") + e.what());
+            return NMSLIB_ERROR_OUT_OF_MEMORY;
+        } catch (const std::exception& e) {
+            const std::string what = e.what() ? std::string(e.what()) : std::string("unknown exception");
+
+            // Handle known "not supported" exceptions (HNSW etc.)
+            if (what.find("Range search") != std::string::npos ||
+                what.find("RangeQuery") != std::string::npos ||
+                (what.find("range") != std::string::npos &&
+                 what.find("support") != std::string::npos)) {
+
+                SET_LAST_ERROR(NMSLIB_ERROR_SPACE_INCOMPATIBLE,
+                               std::string("Range query not supported by method: ") + what);
+                return NMSLIB_ERROR_SPACE_INCOMPATIBLE;
+            }
+
+            // Generic runtime error
+            SET_LAST_ERROR(NMSLIB_ERROR_RUNTIME,
+                           std::string("Range query exception: ") + what);
+            return NMSLIB_ERROR_RUNTIME;
+        } catch (...) {
+            SET_LAST_ERROR(NMSLIB_ERROR_QUERY_EXECUTION_FAILED,
+                           "Range query failed (unknown exception)");
+            return NMSLIB_ERROR_QUERY_EXECUTION_FAILED;
+        }
+    });
 }
+
+
 
 nmslib_error_t nmslib_get_distance(
     nmslib_index_handle_t index,
