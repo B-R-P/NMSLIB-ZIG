@@ -1062,7 +1062,7 @@ pub const Index = struct {
                     if (size_bytes % @sizeOf(f32) != 0) return error.Runtime;
                     const elem_count = size_bytes / @sizeOf(f32);
 
-                    var tmp_bytes = try alloc.alloc(u8, size_bytes);
+                    const tmp_bytes = try alloc.alloc(u8, size_bytes);
                     defer alloc.free(tmp_bytes);
 
                     try mapError(
@@ -1094,7 +1094,7 @@ pub const Index = struct {
                     if (size_bytes % @sizeOf(SparseElem) != 0) return error.Runtime;
                     const elem_count = size_bytes / @sizeOf(SparseElem);
 
-                    var tmp_bytes = try alloc.alloc(u8, size_bytes);
+                    const tmp_bytes = try alloc.alloc(u8, size_bytes);
                     defer alloc.free(tmp_bytes);
 
                     try mapError(
@@ -1123,7 +1123,7 @@ pub const Index = struct {
                 .DenseUInt8Vector => {
                     if (size_bytes == 0) return error.Runtime;
 
-                    var buf = try alloc.alloc(u8, size_bytes);
+                    const buf = try alloc.alloc(u8, size_bytes);
                     defer alloc.free(buf);
 
                     try mapError(
@@ -1149,7 +1149,7 @@ pub const Index = struct {
                 },
 
                 .ObjectAsString => {
-                    var tmp_bytes = try alloc.alloc(u8, size_bytes);
+                    const tmp_bytes = try alloc.alloc(u8, size_bytes);
                     defer alloc.free(tmp_bytes);
 
                     try mapError(
