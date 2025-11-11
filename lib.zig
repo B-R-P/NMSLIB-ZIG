@@ -26,8 +26,6 @@ pub const Error = Allocator.Error || error{
     IndexAlreadyBuilt,
 };
 
-
-
 fn mapError(err: c.nmslib_error_t) Error!void {
     if (err != c.NMSLIB_SUCCESS) {
         std.log.debug("NMSLIB call failed with code {}\n", .{err});
@@ -74,7 +72,6 @@ fn mapError(err: c.nmslib_error_t) Error!void {
         else => error.Runtime,
     };
 }
-
 
 pub fn nmslibInitFromZig() void {
     // call the C-exported init function (this is safe to call multiple times)
@@ -164,9 +161,6 @@ pub const Descriptor = union(DataType) {
     }
 };
 
-
-
-
 // Sparse elem
 pub const SparseElem = extern struct { id: u32, value: f32 };
 const array_list = std.array_list;
@@ -181,24 +175,17 @@ pub const DataStorage = struct {
         self.descriptors.deinit();
     }
 
-pub fn init(allocator: Allocator, data_type: DataType) !DataStorage {
-    _ = data_type; // Unused for unified
+    pub fn init(allocator: Allocator, data_type: DataType) !DataStorage {
+        _ = data_type; // Unused for unified
 
-    const arena = std.heap.ArenaAllocator.init(allocator);
-    const descriptors = array_list.Managed(Descriptor).init(allocator);
+        const arena = std.heap.ArenaAllocator.init(allocator);
+        const descriptors = array_list.Managed(Descriptor).init(allocator);
 
-    return .{
-        .arena = arena,
-        .descriptors = descriptors,
-    };
-}
-
-
-
-
-
-
-
+        return .{
+            .arena = arena,
+            .descriptors = descriptors,
+        };
+    }
 };
 
 // Alloc context (unchanged)
@@ -221,10 +208,6 @@ const AllocContext = struct {
             .map = map,
             .child_allocator = parent,
         };
-
-
-
-
     }
 
     fn deinit(self: *AllocContext) void {
@@ -273,10 +256,6 @@ fn c_free_fn(ptr: ?*anyopaque, ctx: ?*anyopaque) callconv(.c) void {
     }
 }
 
-
-
-
-
 // Add `keys` field to Params struct (replace the existing Params definition's field list accordingly)
 pub const Params = struct {
     c_params: c.nmslib_params_handle_t,
@@ -285,7 +264,6 @@ pub const Params = struct {
 
     // track duplicated keys so we can answer has() queries from Zig side
     keys: array_list.AlignedManaged([]u8, null),
-
 
     pub fn init(allocator: Allocator) !Params {
         const tracker = try allocator.create(AllocContext);
@@ -314,21 +292,16 @@ pub const Params = struct {
         };
     }
 
-
     pub fn deinit(self: *Params) void {
         c.nmslib_free_params(self.c_params);
 
         for (self.keys.items) |k|
             self.allocator.free(k);
 
-
         self.keys.deinit();
         self.alloc_context.map.deinit();
         self.allocator.destroy(self.alloc_context);
     }
-
-
-
 
     pub fn add(self: *Params, key: []const u8, value: ParamValue) !void {
         const key_z = try self.allocator.dupeZ(u8, key);
@@ -338,11 +311,8 @@ pub const Params = struct {
             .String => |s| {
                 const value_z = try self.allocator.dupeZ(u8, s);
                 defer self.allocator.free(value_z[0 .. value_z.len + 1]);
-                try mapError(c.nmslib_add_param(
-                    self.c_params,
-                    key_full.ptr,        // ✅ pass pointer, not slice
-                    2,
-                    @ptrCast(value_z.ptr) // ✅ pointer to NUL-terminated string
+                try mapError(c.nmslib_add_param(self.c_params, key_full.ptr, // ✅ pass pointer, not slice
+                    2, @ptrCast(value_z.ptr) // ✅ pointer to NUL-terminated string
                 ));
             },
             .Int => |i| try mapError(c.nmslib_add_param(
@@ -362,15 +332,12 @@ pub const Params = struct {
         try self.keys.append(key_full);
     }
 
-
-
     pub fn has(self: *const Params, key: []const u8) bool {
         for (self.keys.items) |k| {
             if (k.len == key.len and std.mem.eql(u8, k, key)) return true;
         }
         return false;
     }
-
 
     pub fn fromSlice(allocator: Allocator, pairs: []const struct { key: []const u8, value: ParamValue }) !Params {
         var params = try Params.init(allocator);
@@ -427,19 +394,11 @@ pub const QueryResult = struct {
 
     pub fn deinit(self: @This()) void {
         // Free whichever allocations exist, without double-freeing
-        if (self.full_ids_ptr) |buf| self.allocator.free(buf)
-        else if (self.full_ids) |buf| self.allocator.free(buf);
+        if (self.full_ids_ptr) |buf| self.allocator.free(buf) else if (self.full_ids) |buf| self.allocator.free(buf);
 
-        if (self.full_dist_ptr) |buf| self.allocator.free(buf)
-        else if (self.full_distances) |buf| self.allocator.free(buf);
+        if (self.full_dist_ptr) |buf| self.allocator.free(buf) else if (self.full_distances) |buf| self.allocator.free(buf);
     }
 };
-
-
-
-
-
-
 
 pub const BatchResult = struct {
     results: []QueryResult,
@@ -581,13 +540,6 @@ pub const Index = struct {
         };
     }
 
-
-
-
-
-
-
-
     pub fn deinit(self: *Self) void {
         if (self.built) {
             c.nmslib_index_destroy(self.handle);
@@ -637,9 +589,6 @@ pub const Index = struct {
                 c_ids[i] = if (desc_id != 0) desc_id else @as(i32, @intCast(i));
             }
 
-
-
-
             var num_elems_slice: ?[]usize = null;
             defer if (num_elems_slice) |slice| self.allocator.free(slice);
             var num_elems_ptr: ?[*]const usize = null;
@@ -656,27 +605,14 @@ pub const Index = struct {
                 // The C API for string batches expects const char* const* data and ids.
                 // c_ptrs currently contains pointers to the string data (`ObjectAsString.data_ptr`).
                 // Cast the generic pointer array to the expected C pointer type when calling.
-                try mapError(c.nmslib_add_data_point_batch_string(
-                    self.handle,
-                    @as([*] [*]const u8, @ptrCast(c_ptrs.ptr)), // cast to const char* const*
-                    len,
-                    c_ids.ptr
-                ));
+                try mapError(c.nmslib_add_data_point_batch_string(self.handle, @as([*][*]const u8, @ptrCast(c_ptrs.ptr)), // cast to const char* const*
+                    len, c_ids.ptr));
             } else {
                 const mode = self.data_type.toDataMode();
-                try mapError(c.nmslib_add_data_point_batch_pointers(
-                    self.handle,
-                    mode,
-                    c_ptrs.ptr,
-                    len,
-                    self.getDim(),
-                    c_ids.ptr,
-                    num_elems_ptr
-                ));
+                try mapError(c.nmslib_add_data_point_batch_pointers(self.handle, mode, c_ptrs.ptr, len, self.getDim(), c_ids.ptr, num_elems_ptr));
             }
         }
     }
-
 
     pub fn clearIndexCache(self: *Self) !void {
         if (!self.built) return;
@@ -696,7 +632,6 @@ pub const Index = struct {
             .SparseVector, .ObjectAsString => 0,
         };
     }
-
 
     pub fn addDenseBatch(self: *Self, data: []const []const f32, ids: ?[]const i32) !void {
         if (self.built) return error.IndexAlreadyBuilt;
@@ -719,10 +654,6 @@ pub const Index = struct {
             });
         }
     }
-
-
-
-
 
     pub fn addSparseBatch(self: *Self, data: []const []const SparseElem, ids: ?[]const i32) !void {
         if (self.built) return error.IndexAlreadyBuilt;
@@ -757,10 +688,6 @@ pub const Index = struct {
         }
     }
 
-
-
-
-
     pub fn addUInt8Batch(self: *Self, data: []const []const u8, ids: ?[]const i32) !void {
         if (self.built) return error.IndexAlreadyBuilt;
         if (data.len == 0 or data[0].len == 0) return error.InvalidArgument;
@@ -782,8 +709,6 @@ pub const Index = struct {
             });
         }
     }
-
-
 
     pub fn addStringBatch(self: *Self, data: []const []const u8, ids: ?[]const i32) !void {
         if (self.built) return error.IndexAlreadyBuilt;
@@ -817,22 +742,22 @@ pub const Index = struct {
         switch (query_in) {
             .DenseVector => |q| {
                 c_query_ptr = @ptrCast(q.ptr);
-                c_query_len = q.len;        // number of floats
+                c_query_len = q.len; // number of floats
                 c_num_elements = 0;
             },
             .SparseVector => |q| {
                 c_query_ptr = @ptrCast(q.ptr);
-                c_query_len = q.len;        // number of sparse elems
+                c_query_len = q.len; // number of sparse elems
                 c_num_elements = q.len;
             },
             .DenseUInt8Vector => |q| {
                 c_query_ptr = @ptrCast(q.ptr);
-                c_query_len = q.len;        // number of bytes
+                c_query_len = q.len; // number of bytes
                 c_num_elements = 0;
             },
             .ObjectAsString => |q| {
                 c_query_ptr = @ptrCast(q.ptr);
-                c_query_len = q.len;        // length of string bytes
+                c_query_len = q.len; // length of string bytes
                 c_num_elements = 0;
             },
         }
@@ -888,15 +813,12 @@ pub const Index = struct {
         return QueryResult{
             .ids = ids_trimmed,
             .distances = dist_trimmed,
-            .full_ids = ids,                // full allocated buffers: will be freed by QueryResult.deinit
+            .full_ids = ids, // full allocated buffers: will be freed by QueryResult.deinit
             .full_distances = distances,
             .used = n,
             .allocator = self.allocator,
         };
     }
-
-
-
 
     pub fn knnQueryBatch(self: *Self, queries: []const []const f32, k: usize, thread_pool_size: ?usize) !BatchResult {
         if (!self.built) try self.buildIndex(null, false);
@@ -942,9 +864,6 @@ pub const Index = struct {
         return .{ .results = results, .allocator = self.allocator };
     }
 
-
-
-
     pub fn rangeQuery(self: *Self, query: []const f32, radius: f64) !QueryResult {
         if (!self.built) try self.buildIndex(null, false);
         if (self.data_type != .DenseVector) return error.SpaceIncompatible;
@@ -988,10 +907,6 @@ pub const Index = struct {
         };
     }
 
-
-
-
-
     pub fn getDistance(self: *Self, pos1: usize, pos2: usize) !f32 {
         if (!self.built) try self.buildIndex(null, false);
         var distance: f32 = std.math.nan(f32);
@@ -999,7 +914,6 @@ pub const Index = struct {
         if (std.math.isNan(distance)) return error.QueryExecutionFailed;
         return distance;
     }
-
 
     pub fn getDataPoint(self: *Self, pos: usize) !DataPoint {
         if (self.data_storage.descriptors.items.len == 0 and self.built)
@@ -1015,7 +929,6 @@ pub const Index = struct {
         };
     }
 
-
     /// Returns a borrowed slice to the internal string data.
     /// The memory is owned by the index’s arena; do NOT free it.
     pub fn borrowDataPointString(self: *Self, pos: usize) ![]const u8 {
@@ -1025,13 +938,14 @@ pub const Index = struct {
         return o.data_ptr[0..o.length];
     }
 
-
     pub fn borrowDataDense(self: *Self, pos: usize) !struct { data: []const f32, free_fn: *const fn (?*anyopaque) void } {
         if (self.data_type != .DenseVector) return error.SpaceIncompatible;
         const qty = self.dataQty();
         if (pos >= qty) return error.InvalidArgument;
         const d = self.data_storage.descriptors.items[pos].DenseVector;
-        return .{ .data = d.data_ptr[0..d.length], .free_fn = struct { fn noop(_: ?*anyopaque) void {} }.noop };  // No-op free
+        return .{ .data = d.data_ptr[0..d.length], .free_fn = struct {
+            fn noop(_: ?*anyopaque) void {}
+        }.noop }; // No-op free
     }
 
     pub fn borrowDataSparse(self: *Self, pos: usize) !struct { data: []const SparseElem, free_fn: *const fn (?*anyopaque) void } {
@@ -1039,7 +953,9 @@ pub const Index = struct {
         const qty = self.dataQty();
         if (pos >= qty) return error.InvalidArgument;
         const s = self.data_storage.descriptors.items[pos].SparseVector;
-        return .{ .data = s.data_ptr[0..s.num_elements], .free_fn = struct { fn noop(_: ?*anyopaque) void {} }.noop };
+        return .{ .data = s.data_ptr[0..s.num_elements], .free_fn = struct {
+            fn noop(_: ?*anyopaque) void {}
+        }.noop };
     }
 
     pub fn save(self: *Self, path: []const u8, save_data: bool) !void {
@@ -1075,7 +991,7 @@ pub const Index = struct {
                     );
 
                     // Interpret the bytes as f32 values (const view).
-                    const buf = @as([*]const f32, @alignCast(@ptrCast(tmp_bytes.ptr)))[0..elem_count];
+                    const buf = @as([*]const f32, @ptrCast(@alignCast(tmp_bytes.ptr)))[0..elem_count];
                     const copied = try alloc.dupe(f32, buf);
 
                     const desc = Descriptor{
@@ -1087,7 +1003,6 @@ pub const Index = struct {
                         },
                     };
                     try self.data_storage.descriptors.append(desc);
-
                 },
 
                 .SparseVector => {
@@ -1106,7 +1021,7 @@ pub const Index = struct {
                         ),
                     );
 
-                    const buf = @as([*]const SparseElem, @alignCast(@ptrCast(tmp_bytes.ptr)))[0..elem_count];
+                    const buf = @as([*]const SparseElem, @ptrCast(@alignCast(tmp_bytes.ptr)))[0..elem_count];
                     const copied = try alloc.dupe(SparseElem, buf);
 
                     const desc = Descriptor{
@@ -1178,13 +1093,6 @@ pub const Index = struct {
         }
     }
 
-
-
-
-
-
-
-
     pub fn load(allocator: Allocator, path: []const u8, data_type: DataType, dist_type: DistType, load_data: bool) !Self {
         const tracker = try allocator.create(AllocContext);
         errdefer allocator.destroy(tracker);
@@ -1227,8 +1135,6 @@ pub const Index = struct {
         return index;
     }
 
-
-
     pub fn setQueryTimeParams(self: *Self, params: Params) !void {
         if (!self.built) try self.buildIndex(null, false);
         try mapError(c.nmslib_set_query_time_params(self.handle, params.c_params));
@@ -1266,13 +1172,6 @@ pub const Index = struct {
 
         return try self.allocator.dupe(u8, got);
     }
-
-
-
-
-
-
-
 
     pub fn getMethod(self: *Self) ![]const u8 {
         var method: [*c]const u8 = undefined;
@@ -1330,7 +1229,7 @@ test "Index dense vector workflow" {
     try testing.expectApproxEqAbs(0.0, result.distances[0], 0.0001);
     try testing.expectEqual(10, result.ids[0]);
     const dist = try index.getDistance(0, 1);
-    try testing.expectApproxEqAbs(@sqrt(2.0), dist, 0.0001);  // Fixed sqrt
+    try testing.expectApproxEqAbs(@sqrt(2.0), dist, 0.0001); // Fixed sqrt
     const data_point = try index.getDataPoint(0);
     try testing.expectEqualSlices(f32, &[_]f32{ 1.0, 0.0, 0.0, 0.0 }, data_point.DenseVector);
     const borrowed = try index.borrowDataDense(0);
@@ -1361,7 +1260,7 @@ test "Index sparse vector workflow" {
     try index.addSparseBatch(&data, &ids);
     try index.buildIndex(null, false);
 
-    const query = QueryPoint{ .SparseVector = &[_]SparseElem{ .{ .id = 1, .value = 1.0 } } };
+    const query = QueryPoint{ .SparseVector = &[_]SparseElem{.{ .id = 1, .value = 1.0 }} };
     const result = try index.knnQuery(query, 2);
     defer result.deinit();
 
@@ -1412,8 +1311,6 @@ test "Index uint8 vector workflow" {
     try testing.expectEqual(2, result.ids.len);
 }
 
-
-
 test "Index string data workflow" {
     const allocator = testing.allocator;
     // ✅ Use Int distance for this build — Levenshtein space registered only for integer distance
@@ -1453,15 +1350,12 @@ test "getDistance (L2) matches manual computation" {
     try index.buildIndex(null, false);
 
     const dist = try index.getDistance(0, 1);
-    const expected = std.math.sqrt(
-        (1.0 - 0.0) * (1.0 - 0.0) +
+    const expected = std.math.sqrt((1.0 - 0.0) * (1.0 - 0.0) +
         (0.0 - 1.0) * (0.0 - 1.0) +
         (0.0 - 0.0) * (0.0 - 0.0) +
-        (0.0 - 0.0) * (0.0 - 0.0)
-    );
+        (0.0 - 0.0) * (0.0 - 0.0));
     try testing.expect(@abs(dist - expected) < 1e-6);
 }
-
 
 test "rangeQuery returns neighbors inside radius" {
     const allocator = testing.allocator;
@@ -1508,9 +1402,6 @@ test "rangeQuery returns neighbors inside radius" {
     try testing.expect(found_id1 or found_id2);
 }
 
-
-
-
 test "borrowDataDense returns a view equal to original vector" {
     const allocator = testing.allocator;
 
@@ -1548,8 +1439,8 @@ test "getDataPoint with invalid position returns InvalidArgument" {
     var index = try Index.init(allocator, "l2", params, "hnsw", .DenseVector, .Float);
     defer index.deinit();
 
-    const data = [_][]const f32{ &[_]f32{ 0.0, 0.0 } };
-    const ids = [_]i32{ 1 };
+    const data = [_][]const f32{&[_]f32{ 0.0, 0.0 }};
+    const ids = [_]i32{1};
     try index.addDenseBatch(&data, &ids);
     try index.buildIndex(null, false);
 

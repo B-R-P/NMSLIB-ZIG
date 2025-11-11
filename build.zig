@@ -98,7 +98,6 @@ pub fn build(b: *std.Build) void {
         "-fno-function-sections",
     };
 
-
     // Create the root module for the library
     const root_module = b.createModule(.{
         .root_source_file = b.path("lib.zig"),
@@ -115,7 +114,7 @@ pub fn build(b: *std.Build) void {
 
     // Add NMSLIB sources + wrapper
     lib.addCSourceFiles(.{
-        .files = nmslib_sources ++ &[_][]const u8{ "nmslib_c.cpp" },
+        .files = nmslib_sources ++ &[_][]const u8{"nmslib_c.cpp"},
         .flags = cpp_flags_lib,
     });
 
@@ -146,7 +145,7 @@ pub fn build(b: *std.Build) void {
 
     // Configure test includes and sources (same as lib, but with test flags)
     tests.addCSourceFiles(.{
-        .files = nmslib_sources ++ &[_][]const u8{ "nmslib_c.cpp" },
+        .files = nmslib_sources ++ &[_][]const u8{"nmslib_c.cpp"},
         .flags = cpp_flags_test,
     });
     tests.addIncludePath(b.path("."));

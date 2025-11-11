@@ -1,8 +1,8 @@
 #ifndef NMSLIB_C_H
 #define NMSLIB_C_H
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
-#include <stdbool.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -17,10 +17,7 @@ typedef enum {
 } nmslib_data_type_t;
 
 // Distance types
-typedef enum {
-    NMSLIB_DISTTYPE_FLOAT,
-    NMSLIB_DISTTYPE_INT
-} nmslib_dist_type_t;
+typedef enum { NMSLIB_DISTTYPE_FLOAT, NMSLIB_DISTTYPE_INT } nmslib_dist_type_t;
 
 // Error codes
 typedef enum {
@@ -82,7 +79,6 @@ typedef struct {
     nmslib_dist_type_t dist_type;
 } nmslib_index_header_t;
 
-
 // Opaque handle for the NMSLIB index
 typedef struct nmslib_index_t* nmslib_index_handle_t;
 
@@ -107,14 +103,9 @@ void nmslib_init(void);
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_index_create(
-    const char* space,
-    nmslib_params_handle_t space_params,
-    const char* method,
-    nmslib_data_type_t data_type,
-    nmslib_dist_type_t dist_type,
-    const nmslib_allocator_t* allocator,
-    nmslib_index_handle_t* out_handle
-);
+    const char* space, nmslib_params_handle_t space_params, const char* method,
+    nmslib_data_type_t data_type, nmslib_dist_type_t dist_type,
+    const nmslib_allocator_t* allocator, nmslib_index_handle_t* out_handle);
 
 /**
  * Destroys an NMSLIB index.
@@ -131,11 +122,9 @@ void nmslib_index_destroy(nmslib_index_handle_t handle);
  * @param print_progress Whether to print progress.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_create_index(
-    nmslib_index_handle_t index,
-    nmslib_params_handle_t index_params,
-    int print_progress
-);
+nmslib_error_t nmslib_create_index(nmslib_index_handle_t index,
+                                   nmslib_params_handle_t index_params,
+                                   int print_progress);
 
 /**
  * Resets an NMSLIB index.
@@ -151,7 +140,8 @@ nmslib_error_t nmslib_reset_index(nmslib_index_handle_t index);
  * @param allocator The allocator to use for memory management.
  * @return Handle to the created parameters object.
  */
-nmslib_params_handle_t nmslib_create_params(const nmslib_allocator_t* allocator);
+nmslib_params_handle_t nmslib_create_params(
+    const nmslib_allocator_t* allocator);
 
 /**
  * Adds a parameter to the NMSLIB parameters object.
@@ -162,12 +152,8 @@ nmslib_params_handle_t nmslib_create_params(const nmslib_allocator_t* allocator)
  * @param value The value of the parameter.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_add_param(
-    nmslib_params_handle_t params,
-    const char* name,
-    int type,
-    const void* value
-);
+nmslib_error_t nmslib_add_param(nmslib_params_handle_t params, const char* name,
+                                int type, const void* value);
 
 /**
  * Frees an NMSLIB parameters object.
@@ -185,12 +171,10 @@ void nmslib_free_params(nmslib_params_handle_t params);
  * @param allocator The allocator to use for memory management.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_get_space_type(
-    nmslib_index_handle_t index,
-    const char** space_type,
-    size_t* space_type_len,
-    const nmslib_allocator_t* allocator
-);
+nmslib_error_t nmslib_get_space_type(nmslib_index_handle_t index,
+                                     const char** space_type,
+                                     size_t* space_type_len,
+                                     const nmslib_allocator_t* allocator);
 
 /**
  * Gets the method of an NMSLIB index.
@@ -201,12 +185,9 @@ nmslib_error_t nmslib_get_space_type(
  * @param allocator The allocator to use for memory management.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_get_method(
-    nmslib_index_handle_t index,
-    const char** method,
-    size_t* method_len,
-    const nmslib_allocator_t* allocator
-);
+nmslib_error_t nmslib_get_method(nmslib_index_handle_t index,
+                                 const char** method, size_t* method_len,
+                                 const nmslib_allocator_t* allocator);
 
 /**
  * Frees a string allocated by NMSLIB.
@@ -224,9 +205,7 @@ void nmslib_free_string(char* str, const nmslib_allocator_t* allocator);
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_get_last_error_detail(
-    nmslib_error_detail_t* detail,
-    const nmslib_allocator_t* allocator
-);
+    nmslib_error_detail_t* detail, const nmslib_allocator_t* allocator);
 
 /**
  * Adds a data point to the NMSLIB index.
@@ -237,12 +216,9 @@ nmslib_error_t nmslib_get_last_error_detail(
  * @param id The ID of the data point.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_add_data_point(
-    nmslib_index_handle_t index,
-    const void* data,
-    size_t element_count,
-    int32_t id
-);
+nmslib_error_t nmslib_add_data_point(nmslib_index_handle_t index,
+                                     const void* data, size_t element_count,
+                                     int32_t id);
 
 /**
  * Adds a batch of data points to the NMSLIB index.
@@ -250,19 +226,18 @@ nmslib_error_t nmslib_add_data_point(
  * @param index The index handle.
  * @param data The data points to add (flat buffer).
  * @param count The number of data points to add.
- * @param element_count The number of elements in each data point (dim for dense).
+ * @param element_count The number of elements in each data point (dim for
+ * dense).
  * @param ids The IDs of the data points (NULL for auto).
- * @param num_elements The number of elements in each sparse data point (NULL for dense).
+ * @param num_elements The number of elements in each sparse data point (NULL
+ * for dense).
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_add_data_point_batch(
-    nmslib_index_handle_t index,
-    const void* data,
-    size_t count,
-    size_t element_count,
-    const int32_t* ids,
-    const size_t* num_elements
-);
+nmslib_error_t nmslib_add_data_point_batch(nmslib_index_handle_t index,
+                                           const void* data, size_t count,
+                                           size_t element_count,
+                                           const int32_t* ids,
+                                           const size_t* num_elements);
 
 /**
  * Adds a batch of uint8 data points to the NMSLIB index.
@@ -274,13 +249,11 @@ nmslib_error_t nmslib_add_data_point_batch(
  * @param ids The IDs of the data points (NULL for auto).
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_add_data_point_batch_uint8(
-    nmslib_index_handle_t index,
-    const unsigned char* data,
-    size_t count,
-    size_t element_count,
-    const int32_t* ids
-);
+nmslib_error_t nmslib_add_data_point_batch_uint8(nmslib_index_handle_t index,
+                                                 const unsigned char* data,
+                                                 size_t count,
+                                                 size_t element_count,
+                                                 const int32_t* ids);
 
 /**
  * Adds a batch of string data points to the NMSLIB index.
@@ -291,12 +264,10 @@ nmslib_error_t nmslib_add_data_point_batch_uint8(
  * @param ids The IDs of the data points (NULL for auto).
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_add_data_point_batch_string(
-    nmslib_index_handle_t index,
-    const char* const* data,
-    size_t count,
-    const int32_t* ids
-);
+nmslib_error_t nmslib_add_data_point_batch_string(nmslib_index_handle_t index,
+                                                  const char* const* data,
+                                                  size_t count,
+                                                  const int32_t* ids);
 
 /**
  * Gets the size required for a k-NN query result.
@@ -309,14 +280,11 @@ nmslib_error_t nmslib_add_data_point_batch_string(
  * @param num_elements The number of elements in the query (for sparse).
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_knn_query_get_size(
-    nmslib_index_handle_t index,
-    const void* query,
-    size_t query_size_or_elem_count,
-    size_t k,
-    size_t* out_size,
-    size_t num_elements
-);
+nmslib_error_t nmslib_knn_query_get_size(nmslib_index_handle_t index,
+                                         const void* query,
+                                         size_t query_size_or_elem_count,
+                                         size_t k, size_t* out_size,
+                                         size_t num_elements);
 
 /**
  * Fills a k-NN query result.
@@ -329,14 +297,11 @@ nmslib_error_t nmslib_knn_query_get_size(
  * @param num_elements The number of elements in the query (for sparse).
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_knn_query_fill(
-    nmslib_index_handle_t index,
-    const void* query,
-    size_t query_size_or_elem_count,
-    size_t k,
-    nmslib_result_t* result,
-    size_t num_elements
-);
+nmslib_error_t nmslib_knn_query_fill(nmslib_index_handle_t index,
+                                     const void* query,
+                                     size_t query_size_or_elem_count, size_t k,
+                                     nmslib_result_t* result,
+                                     size_t num_elements);
 
 /**
  * Performs a batch k-NN query.
@@ -351,16 +316,12 @@ nmslib_error_t nmslib_knn_query_fill(
  * @param thread_pool_size The size of the thread pool.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_knn_query_batch(
-    nmslib_index_handle_t index,
-    const void* queries,
-    size_t query_count,
-    size_t query_size_or_elem_count,
-    size_t k,
-    nmslib_result_t* results,
-    const size_t* num_elements,
-    size_t thread_pool_size
-);
+nmslib_error_t nmslib_knn_query_batch(nmslib_index_handle_t index,
+                                      const void* queries, size_t query_count,
+                                      size_t query_size_or_elem_count, size_t k,
+                                      nmslib_result_t* results,
+                                      const size_t* num_elements,
+                                      size_t thread_pool_size);
 
 /**
  * Gets the size required for a range query result.
@@ -373,14 +334,11 @@ nmslib_error_t nmslib_knn_query_batch(
  * @param num_elements The number of elements in the query (for sparse).
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_range_query_get_size(
-    nmslib_index_handle_t index,
-    const void* query,
-    size_t query_size_or_elem_count,
-    double radius,
-    size_t* out_size,
-    size_t num_elements
-);
+nmslib_error_t nmslib_range_query_get_size(nmslib_index_handle_t index,
+                                           const void* query,
+                                           size_t query_size_or_elem_count,
+                                           double radius, size_t* out_size,
+                                           size_t num_elements);
 
 /**
  * Fills a range query result.
@@ -393,14 +351,11 @@ nmslib_error_t nmslib_range_query_get_size(
  * @param num_elements The number of elements in the query (for sparse).
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_range_query_fill(
-    nmslib_index_handle_t index,
-    const void* query,
-    size_t query_size_or_elem_count,
-    double radius,
-    nmslib_result_t* result,
-    size_t num_elements
-);
+nmslib_error_t nmslib_range_query_fill(nmslib_index_handle_t index,
+                                       const void* query,
+                                       size_t query_size_or_elem_count,
+                                       double radius, nmslib_result_t* result,
+                                       size_t num_elements);
 
 /**
  * Gets the distance between two data points in the NMSLIB index.
@@ -411,12 +366,8 @@ nmslib_error_t nmslib_range_query_fill(
  * @param distance Pointer to store the distance.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_get_distance(
-    nmslib_index_handle_t index,
-    size_t pos1,
-    size_t pos2,
-    float* distance
-);
+nmslib_error_t nmslib_get_distance(nmslib_index_handle_t index, size_t pos1,
+                                   size_t pos2, float* distance);
 
 /**
  * Gets the size of a data point in the NMSLIB index.
@@ -426,11 +377,8 @@ nmslib_error_t nmslib_get_distance(
  * @param size Pointer to store the size.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_get_data_point_size(
-    nmslib_index_handle_t index,
-    size_t position,
-    size_t* size
-);
+nmslib_error_t nmslib_get_data_point_size(nmslib_index_handle_t index,
+                                          size_t position, size_t* size);
 
 /**
  * Fills a data point from the NMSLIB index.
@@ -441,12 +389,9 @@ nmslib_error_t nmslib_get_data_point_size(
  * @param size The size of the data point.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_get_data_point_fill(
-    nmslib_index_handle_t index,
-    size_t position,
-    void* data,
-    size_t size
-);
+nmslib_error_t nmslib_get_data_point_fill(nmslib_index_handle_t index,
+                                          size_t position, void* data,
+                                          size_t size);
 
 /**
  * Gets a string data point from the NMSLIB index.
@@ -459,12 +404,8 @@ nmslib_error_t nmslib_get_data_point_fill(
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_get_data_point_string(
-    nmslib_index_handle_t index,
-    size_t position,
-    const char** data,
-    size_t* data_len,
-    const nmslib_allocator_t* allocator
-);
+    nmslib_index_handle_t index, size_t position, const char** data,
+    size_t* data_len, const nmslib_allocator_t* allocator);
 
 /**
  * Borrows a dense data point from the NMSLIB index.
@@ -476,13 +417,9 @@ nmslib_error_t nmslib_get_data_point_string(
  * @param free_fn Pointer to store the free function.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_borrow_data_dense(
-    nmslib_index_handle_t index,
-    size_t position,
-    void** data,
-    size_t* size,
-    void (**free_fn)(void*)
-);
+nmslib_error_t nmslib_borrow_data_dense(nmslib_index_handle_t index,
+                                        size_t position, void** data,
+                                        size_t* size, void (**free_fn)(void*));
 
 /**
  * Borrows a sparse data point from the NMSLIB index.
@@ -494,13 +431,9 @@ nmslib_error_t nmslib_borrow_data_dense(
  * @param free_fn Pointer to store the free function.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_borrow_data_sparse(
-    nmslib_index_handle_t index,
-    size_t position,
-    void** data,
-    size_t* size,
-    void (**free_fn)(void*)
-);
+nmslib_error_t nmslib_borrow_data_sparse(nmslib_index_handle_t index,
+                                         size_t position, void** data,
+                                         size_t* size, void (**free_fn)(void*));
 
 /**
  * Saves an NMSLIB index to a file.
@@ -510,11 +443,8 @@ nmslib_error_t nmslib_borrow_data_sparse(
  * @param save_data Whether to save the data.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_save_index(
-    nmslib_index_handle_t index,
-    const char* path,
-    int save_data
-);
+nmslib_error_t nmslib_save_index(nmslib_index_handle_t index, const char* path,
+                                 int save_data);
 
 /**
  * Loads an NMSLIB index from a file.
@@ -527,14 +457,11 @@ nmslib_error_t nmslib_save_index(
  * @param out_handle Pointer to store the loaded index handle.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_load_index(
-    const char* path,
-    nmslib_data_type_t data_type,
-    nmslib_dist_type_t dist_type,
-    const nmslib_allocator_t* allocator,
-    int load_data,
-    nmslib_index_handle_t* out_handle
-);
+nmslib_error_t nmslib_load_index(const char* path, nmslib_data_type_t data_type,
+                                 nmslib_dist_type_t dist_type,
+                                 const nmslib_allocator_t* allocator,
+                                 int load_data,
+                                 nmslib_index_handle_t* out_handle);
 
 /**
  * Sets the query time parameters for an NMSLIB index.
@@ -543,10 +470,8 @@ nmslib_error_t nmslib_load_index(
  * @param params The parameters handle.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_set_query_time_params(
-    nmslib_index_handle_t index,
-    nmslib_params_handle_t params
-);
+nmslib_error_t nmslib_set_query_time_params(nmslib_index_handle_t index,
+                                            nmslib_params_handle_t params);
 
 /**
  * Sets the thread pool size for an NMSLIB index.
@@ -555,10 +480,8 @@ nmslib_error_t nmslib_set_query_time_params(
  * @param size The size of the thread pool.
  * @return Error code indicating success or failure.
  */
-nmslib_error_t nmslib_set_thread_pool_size(
-    nmslib_index_handle_t index,
-    size_t size
-);
+nmslib_error_t nmslib_set_thread_pool_size(nmslib_index_handle_t index,
+                                           size_t size);
 
 /**
  * Gets the thread pool size of an NMSLIB index.
@@ -587,12 +510,15 @@ size_t nmslib_data_qty(nmslib_index_handle_t index);
 size_t nmslib_index_memory_usage(nmslib_index_handle_t handle);
 
 /**
- * Adds a batch of data points to the NMSLIB index using borrowed pointers (zero-copy).
- * Call before nmslib_create_index. For strings, use the legacy batch_string function.
+ * Adds a batch of data points to the NMSLIB index using borrowed pointers
+ * (zero-copy). Call before nmslib_create_index. For strings, use the legacy
+ * batch_string function.
  *
  * @param handle The index handle.
- * @param data_mode The mode: NMSLIB_DATA_MODE_DENSE_FLOAT (0), SPARSE (1), UINT8 (2).
- * @param data_ptrs Array of pointers to each data point (cast to void**; e.g., const float** for dense).
+ * @param data_mode The mode: NMSLIB_DATA_MODE_DENSE_FLOAT (0), SPARSE (1),
+ * UINT8 (2).
+ * @param data_ptrs Array of pointers to each data point (cast to void**; e.g.,
+ * const float** for dense).
  * @param count The number of data points.
  * @param element_count Dimension for dense/uint8 (0 for sparse).
  * @param ids The IDs (NULL for auto).
@@ -600,23 +526,16 @@ size_t nmslib_index_memory_usage(nmslib_index_handle_t handle);
  * @return Error code indicating success or failure.
  */
 nmslib_error_t nmslib_add_data_point_batch_pointers(
-    nmslib_index_handle_t handle,
-    nmslib_data_mode_t data_mode,
-    const void *const *data_ptrs,
-    size_t count,
-    size_t element_count,
-    const int32_t* ids,
-    const size_t* num_elements
-);
+    nmslib_index_handle_t handle, nmslib_data_mode_t data_mode,
+    const void* const* data_ptrs, size_t count, size_t element_count,
+    const int32_t* ids, const size_t* num_elements);
 
-
-// Ensure HNSW internal visited-list pool is initialized for the given index handle.
+// Ensure HNSW internal visited-list pool is initialized for the given index
+// handle.
 void nmslib_initialize_pool(nmslib_index_handle_t index);
-
-
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif // NMSLIB_C_H
+#endif  // NMSLIB_C_H
