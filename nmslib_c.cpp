@@ -9,7 +9,7 @@
 #include "init.h"
 #include "knnquery.h"
 #include "knnqueue.h"
-#include "method/hnsw.h"  // defines similarity::Hnsw
+#include "method/hnsw.h"  // defines Hnsw
 #include "methodfactory.h"
 #include "nmslib_c.h"
 #include "object.h"
@@ -19,14 +19,14 @@
 #include "space/space_sparse_vector.h"
 #include "spacefactory.h"
 #include "thread_pool.h"
+using namespace similarity;
 
 static std::once_flag nmslib_init_flag;
 
 static void nmslib_do_init() {
     // seed = 0, no logging (LIB_LOGNONE). Change if you want logging.
-    similarity::initLibrary(0, LIB_LOGNONE, nullptr);
+    initLibrary(0, LIB_LOGNONE, nullptr);
 }
-using namespace similarity;
 
 // Macro for setting last error (for brevity)
 #define SET_LAST_ERROR(code, msg) \
@@ -331,9 +331,9 @@ static const AnyParams defaultQueryParams = AnyParams({"efSearch=200"});
 
 extern "C" {
 __attribute__((constructor)) static void nmslib_force_space_registry_init() {
-    (void)similarity::SpaceFactoryRegistry<float>::Instance();
-    (void)similarity::SpaceFactoryRegistry<int>::Instance();
-    (void)similarity::SpaceFactoryRegistry<size_t>::Instance();
+    (void)SpaceFactoryRegistry<float>::Instance();
+    (void)SpaceFactoryRegistry<int>::Instance();
+    (void)SpaceFactoryRegistry<size_t>::Instance();
 }
 
 void nmslib_init(void) { std::call_once(nmslib_init_flag, nmslib_do_init); }
@@ -981,7 +981,7 @@ nmslib_error_t nmslib_knn_query_fill(nmslib_index_handle_t index,
                     return NMSLIB_ERROR_INVALID_ARGUMENT;
                 }
 
-                similarity::KNNQuery<dist_t> knnQuery(*idx->space, qobj.get(),
+                KNNQuery<dist_t> knnQuery(*idx->space, qobj.get(),
                                                       k);
                 idx->index_ptr->SetQueryTimeParams(defaultQueryParams);
                 idx->index_ptr->Search(&knnQuery);
@@ -1089,7 +1089,7 @@ nmslib_error_t nmslib_range_query_fill(nmslib_index_handle_t index,
                 }
 
                 // perform range query
-                similarity::RangeQuery<dist_t> rangeQuery(
+                RangeQuery<dist_t> rangeQuery(
                     *idx->space, qobj.get(), static_cast<dist_t>(radius));
 
                 idx->index_ptr->SetQueryTimeParams(defaultQueryParams);
