@@ -425,6 +425,72 @@ pub const DataPoint = union(DataType) {
     ObjectAsString: []const u8,
 };
 
+pub const space_types: []const []const u8 = &.{
+    "abdiv_fast",
+    "abdiv_slow",
+    "angulardist",
+    "angulardist_sparse",
+    "angulardist_sparse_fast",
+    "bit_hamming",
+    "bit_jaccard",
+    "cosine",
+    "cosinesimil",
+    "cosinesimil_sparse",
+    "cosinesimil_sparse_bin_fast",
+    "cosinesimil_sparse_fast",
+    "dummy",
+    "itakurasaitofast",
+    "itakurasaitofastrq",
+    "itakurasaitoslow",
+    "js_div_fast",
+    "js_div_fast_approx",
+    "js_div_slow",
+    "kldivfast",
+    "kldivfastrq",
+    "kldivgenfast",
+    "kldivgenfastrq",
+    "kldivgenslow",
+    "l1",
+    "l2",
+    "l2sqr_sift",
+    "l1_sparse",
+    "l2_sparse",
+    "linf",
+    "lp",
+    "normleven",
+    "negdotprod",
+    "negdotprod_sparse",
+    "negdotprod_sparse_fast",
+    "negdotprod_sparse_bin_fast",
+    "querynorm_negdotprod_sparse",
+    "querynorm_negdotprod_sparse_fast",
+    "renyidiv_fast",
+    "renyidiv_slow",
+    "sparse_dense_fusion",
+    "sparse_vector",
+    "sparse_vector_inter",
+    "sparse_scalar",
+    "sparse_scalar_fast",
+    "sparse_scalar_bin_fast",
+    "sparse_jaccard",
+    "sparse_l1",
+    "sparse_l2",
+    "sparse_linf",
+    "sqfd_gaussian_func",
+    "sqfd_heuristic_func",
+    "sqfd_minus_func",
+    "word_embed",
+    "word_embed_dist_cosine",
+    "word_embed_dist_l2",
+};
+
+pub fn isValidSpaceType(s: []const u8) bool {
+    for (space_types) |name| {
+        if (std.mem.eql(u8, name, s)) return true;
+    }
+    return false;
+}
+
 // Index
 pub const Index = struct {
     const Self = @This();
@@ -1154,7 +1220,7 @@ pub const Index = struct {
         if (self.built) return c.nmslib_data_qty(self.handle);
         return self.data_storage.descriptors.items.len;
     }
-
+    
     pub fn getSpaceType(self: *Self) ![]const u8 {
         var space_type: [*c]const u8 = undefined;
         var space_type_len: usize = undefined;
@@ -1210,6 +1276,7 @@ test "Index dense vector workflow" {
     defer params.deinit();
     try params.add("dim", .{ .Int = 4 });
     var index = try Index.init(allocator, "l2", params, "hnsw", .DenseVector, .Float);
+    try testing.expect(isValidSpaceType("l2"));
     defer index.deinit();
     const data = [_][]const f32{ &[_]f32{ 1.0, 0.0, 0.0, 0.0 }, &[_]f32{ 0.0, 1.0, 0.0, 0.0 }, &[_]f32{ 0.0, 0.0, 1.0, 0.0 } };
     const ids = [_]i32{ 10, 20, 30 };
