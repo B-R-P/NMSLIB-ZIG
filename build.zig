@@ -104,6 +104,7 @@ pub fn build(b: *std.Build) void {
         .target = final_target,
         .optimize = optimize,
     });
+    b.modules.put("nmslib", root_module) catch unreachable;
 
     // Create a static library for NMSLIB wrapper + sources
     const lib = b.addLibrary(.{
@@ -126,12 +127,12 @@ pub fn build(b: *std.Build) void {
     lib.addIncludePath(b.path("include/space"));
 
     lib.linkLibCpp();
+    // Install the header file
+    lib.installHeader(b.path("nmslib_c.h"), "nmslib_c.h");
 
     // Install the library
     b.installArtifact(lib);
 
-    // Install the header file
-    lib.installHeader(b.path("nmslib_c.h"), "nmslib_c.h");
 
     // Add a test step
     const test_module = b.createModule(.{
