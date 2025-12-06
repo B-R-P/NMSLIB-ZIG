@@ -13,10 +13,10 @@
     // A hash of the package's source files for integrity checking.
     .fingerprint = 0xcd5a91d9413474ed,
 
-    // Specifies which files are included when this package is fetched by others.
-    // "build.zig" and "build.zig.zon" are implicitly included.
     .paths = .{
         "lib.zig",
+        "build.zig",
+        "build.zig.zon",
         "nmslib_c.cpp",
         "nmslib_c.h",
         "include",
