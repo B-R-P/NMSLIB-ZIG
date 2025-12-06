@@ -1,0 +1,26 @@
+.{
+    .name = .nmslib,
+    // The version of your project.
+    .version = "0.1.0",
+
+    // The minimum Zig version required for this project.
+    .minimum_zig_version = "0.13.0",
+
+    // Dependencies are added here.
+    .dependencies = .{
+    },
+
+    // A hash of the package's source files for integrity checking.
+    .fingerprint = 0xcd5a91d9413474ed,
+
+    // Specifies which files are included when this package is fetched by others.
+    // "build.zig" and "build.zig.zon" are implicitly included.
+    .paths = .{
+        "lib.zig",
+        "nmslib_c.cpp",
+        "nmslib_c.h",
+        "include",
+        "src",
+        "README.md",
+    },
+}
